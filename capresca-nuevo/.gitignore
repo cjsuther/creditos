@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# Entorno / secretos
+.env
+# Node
+node_modules/
+dist/
+# Datos
+*.dbf
+*.fpt

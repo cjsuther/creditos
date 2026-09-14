@@ -1,0 +1,66 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ccypp
+      POSTGRES_PASSWORD: ccypp
+      POSTGRES_DB: ccypp
+    ports:
+      - "5433:5432"   # host 5433 -> contenedor 5432 (evita choque con Postgres local)
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ccypp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://ccypp:ccypp@db:5432/ccypp
+      JWT_SECRET: ${JWT_SECRET:-cambiar-en-produccion-secreto-largo-y-aleatorio-1234}
+      CORS_ORIGINS: http://localhost:5173,http://localhost:5174
+      # SSO Mi Catamarca (portal). Vacío = proveedor MOCK (dev/demo). Poner las credenciales por .env.
+      MICATAMARCA_CLIENT_ID: ${MICATAMARCA_CLIENT_ID:-}
+      MICATAMARCA_CLIENT_SECRET: ${MICATAMARCA_CLIENT_SECRET:-}
+      MICATAMARCA_REDIRECT_URI: ${MICATAMARCA_REDIRECT_URI:-http://localhost:8000/api/portal/auth/callback}
+      PORTAL_WEB_URL: ${PORTAL_WEB_URL:-http://localhost:5174}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      # Backup real montado sólo lectura para el ETL (ajustar BASES_PATH en .env)
+      - ${BASES_PATH:-./bases}:/bases:ro
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_TARGET: http://backend:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  # Portal público del ciudadano (SSO Mi Catamarca + simulador). Mismo backend, otro puerto/origen.
+  portal:
+    build: ./portal
+    environment:
+      VITE_API_TARGET: http://backend:8000
+    ports:
+      - "5174:5174"
+    depends_on:
+      - backend
+    volumes:
+      - ./portal:/app
+      - /app/node_modules
+
+volumes:
+  pgdata:

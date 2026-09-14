@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/hernan/Documents/Work/Capresca/capresca-nuevo/frontend/scripts/hook-check-diseno.sh",
+            "timeout": 20,
+            "statusMessage": "Verificando principio de diseño (tabla única)…"
+          }
+        ]
+      }
+    ]
+  }
+}

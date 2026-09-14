@@ -1,0 +1,45 @@
+# --- Secretos / entorno (NUNCA subir) ---
+.env
+*.env
+!*.env.example
+
+# --- Datos de producción / backups (backup es producción viva; NO subir) ---
+capresca-nuevo/backups/
+*.dump
+*.sql
+*.bak
+*.bk
+*.bk2
+
+# --- Bases locales / volúmenes ---
+pgdata/
+*.db
+*.sqlite
+*.sqlite3
+_test_ccypp.db
+ccypp_real.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# --- Node / build ---
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# --- Checkpoints locales (snapshots de trabajo) ---
+checkpoints/
+
+# --- SO / editores ---
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
