@@ -767,8 +767,9 @@ def _crear_impl(db: Session, data: CrearIn, user) -> dict:
 
     def _mk_prod(codigo: str) -> m.PPProducto:
         p = m.PPProducto(familia_id=fam.id, padre_id=(padre.id if padre else None), codigo=codigo,
-                         # H-190: si es una copia (Duplicar), recordá de qué producto salió (trazabilidad +
-                         # prompt de "retirar el original" al publicar). La derivación (padre) es otra cosa.
+                         # H-190/H-201: si es una copia (Duplicar), recordá de qué producto salió sólo para
+                         # TRAZABILIDAD/linaje. Una copia es un préstamo independiente: publicarla NO retira el
+                         # original (ambos coexisten). La derivación (padre) es otra cosa.
                          copiado_de=(data.copiar_de if data.copiar_de else None),
                          nombre=data.nombre or (f"{fuente.nombre} ({'derivado' if padre else 'copia'})" if fuente else "Nueva línea de crédito"))
         db.add(p)

@@ -320,8 +320,9 @@ export default function ConfigurarCreditos() {
       avisar({ tipo: "ok", mensaje: `Se creó "${nombre}" como préstamo independiente. Editalo y publicalo.` });
     } catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
   }
-  // H-190: PUBLICAR en un paso (revisar→aprobar→publicar si el cuatro-ojos está apagado). Si es copia de un
-  // préstamo publicado, ofrece retirar el original para no ofrecer los dos a la vez.
+  // PUBLICAR en un paso (revisar→aprobar→publicar si el cuatro-ojos está apagado). Una copia INDEPENDIENTE es
+  // un préstamo NUEVO que coexiste con su origen: al publicarla NO se toca el original (H-201). Si querés dejar
+  // de ofrecer el original, se retira a mano desde su propio menú ("Retirar línea").
   async function publicarCambios() {
     if (!activo) return;
     try {
@@ -329,13 +330,7 @@ export default function ConfigurarCreditos() {
       const r = await api.ppPublicarDirecto(activo.id);
       if (r.producto) upsert(r.producto);
       if (r.needs_approval) { avisar({ tipo: "ok", mensaje: "Enviado a revisión: requiere la aprobación de otra persona (cuatro-ojos)." }); return; }
-      const orig = activo.copiadoDe;
-      if (orig && orig.publicado) {
-        if (await confirmar({ titulo: "¿Retirar el original?", mensaje: `Publicaste "${activo.nombre}".\n\nEs una copia de "${orig.nombre}", que sigue publicado. ¿Retirás el original para no ofrecer los dos a la vez?\n\n(Los contratos ya originados no se tocan.)` })) {
-          try { await api.ppEstado(orig.id, "retirar"); const d = await api.ppCatalogo(); setProductos(d.items); avisar({ tipo: "ok", mensaje: `Publicado. Se retiró "${orig.nombre}".` }); }
-          catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); }
-        } else { avisar({ tipo: "ok", mensaje: "Publicado. Los dos préstamos quedan ofreciéndose." }); }
-      } else { avisar({ tipo: "ok", mensaje: "Préstamo publicado." }); }
+      avisar({ tipo: "ok", mensaje: activo.copiadoDe ? "Préstamo publicado. El original queda intacto (son independientes)." : "Préstamo publicado." });
     } catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
   }
   async function rechazar() { if (!activo) return; try { upsert(await api.ppEstado(activo.id, "rechazar")); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }

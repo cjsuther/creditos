@@ -194,6 +194,17 @@ def crear(data: SolicitudIn, db: Session = Depends(get_db),
         if not (cd.get("apellido_nombre") and cd.get("cuil")):
             raise HTTPException(422, "El alta express requiere al menos nombre y CUIL.")
 
+    # H-202: bloqueo duro por elegibilidad. Si lo declarado NO cumple las condiciones de la línea
+    # (segmento/canal/edad/antigüedad/monto/plazo), no se puede pedir la solicitud — misma regla que el
+    # portal. La evaluación usa la misma fuente que la simulación. (Un dato NO declarado no bloquea:
+    # `_elegibilidad` sólo aplica la regla del atributo cuando ese dato viene.)
+    _tmp = m.PPSolicitud(producto_id=data.producto_id, monto_solicitado=Decimal(str(data.monto_solicitado)),
+                         plazo_solicitado=data.plazo_solicitado, segmento=data.segmento, canal=data.canal,
+                         edad=data.edad, antiguedad_meses=data.antiguedad_meses)
+    _ev = _evaluar(db, _tmp)
+    if not _ev.get("elegible"):
+        raise HTTPException(422, "No cumple las condiciones para esta línea: " + "; ".join(_ev.get("motivos", [])))
+
     def _do() -> dict:
         return _crear_solicitud(db, data, tipo, user)
     # Idempotencia de operación: un reintento con la misma Idempotency-Key no crea otra solicitud.

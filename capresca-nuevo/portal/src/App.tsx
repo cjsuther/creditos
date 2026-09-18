@@ -601,7 +601,7 @@ function Simulador({ sesion, onSalir }: { sesion: Ciudadano; onSalir: () => void
                 <p className="p-fine" style={{ marginTop: 10 }}>{sim.producto} · sistema {SISTEMA[sim.sistema] || sim.sistema} · TNA {sim.tna}% · TEA {sim.tea}% · {sim.cantidad_cuotas} cuotas</p>
                 {sim.elegible === true && <div className="p-ok" style={{ marginTop: 10 }}>✓ Con tus datos calificás para este crédito{sim.afectacion != null ? ` · la cuota es el ${sim.afectacion}% de tu sueldo` : ""}.</div>}
                 {sim.elegible === false && (
-                  <div className="p-warnbox">No calificás con estos datos:<ul>{sim.motivos.map((m2, i) => <li key={i}>{m2}</li>)}</ul>Podés enviar igual; un asesor lo revisa.</div>
+                  <div className="p-warnbox">No calificás con estos datos:<ul>{sim.motivos.map((m2, i) => <li key={i}>{m2}</li>)}</ul>No podés enviar la solicitud hasta cumplir las condiciones. Ajustá los datos o elegí otro crédito.</div>
                 )}
                 {sim.elegible == null && sim.afectacion != null && <div className="p-ok" style={{ marginTop: 10 }}>La cuota es el {sim.afectacion}% de tu sueldo declarado.</div>}
 
@@ -650,7 +650,7 @@ function Simulador({ sesion, onSalir }: { sesion: Ciudadano; onSalir: () => void
                 {sim.afectacion != null && <div><span>Afectación</span>{sim.afectacion}%</div>}
               </div>
               {sim.elegible === true && <div className="p-ok" style={{ marginTop: 4 }}>✓ Con tus datos calificás para este crédito.</div>}
-              {sim.elegible === false && <div className="p-warnbox">Con estos datos no calificás automáticamente, pero podés enviar igual: un asesor lo revisa.</div>}
+              {sim.elegible === false && <div className="p-warnbox">Con estos datos no cumplís las condiciones de este crédito, así que no se puede enviar. Volvé atrás para ajustar los datos o elegir otro crédito.</div>}
 
               <label className="p-fld" style={{ marginTop: 14 }}><span>CBU para acreditar el crédito (22 dígitos)</span>
                 <input inputMode="numeric" maxLength={22} value={cbu}
@@ -663,8 +663,10 @@ function Simulador({ sesion, onSalir }: { sesion: Ciudadano; onSalir: () => void
             </div>
             <div className="p-cta">
               <button type="button" className="p-btn-ghost" onClick={() => setPaso(2)}>← Volver</button>
-              <button className="p-btn p-btn-mc" onClick={enviarSolicitud} disabled={enviando || !puedeEnviar}>{enviando ? "Enviando…" : "Confirmar y enviar solicitud"}</button>
-              {!puedeEnviar && <span className="p-fine">Completá el CBU y aceptá los términos para enviar.</span>}
+              <button className="p-btn p-btn-mc" onClick={enviarSolicitud} disabled={enviando || !puedeEnviar || sim?.elegible === false}>{enviando ? "Enviando…" : "Confirmar y enviar solicitud"}</button>
+              {sim?.elegible === false
+                ? <span className="p-fine">No cumplís las condiciones de este crédito: no se puede enviar.</span>
+                : !puedeEnviar && <span className="p-fine">Completá el CBU y aceptá los términos para enviar.</span>}
             </div>
           </section>
         )}

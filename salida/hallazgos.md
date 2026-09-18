@@ -7,6 +7,48 @@
 
 ---
 
+## H-202 · Solicitud: bloqueo duro por no-elegibilidad (backoffice + portal)
+**Fecha:** 2026-09-18 · **Módulo:** Créditos / Solicitudes · **Alcance:** pedido del usuario
+- **Requerimiento**: al pedir la solicitud —tanto por el **canal web** como por el **backoffice**— si no cumple
+  las condiciones, que **no pueda seguir**. Antes ambos permitían registrar una no-elegible ("un asesor revisa").
+- **Backend (autoritativo)**: `POST /api/solicitudes` (backoffice) y `POST /api/portal/solicitudes` (portal)
+  evalúan la elegibilidad con la **misma fuente que la simulación** (`_evaluar`) y devuelven **422** con los
+  motivos si lo declarado no cumple (segmento/canal/edad/antigüedad/monto/plazo). Un dato **no declarado** no
+  bloquea: `_elegibilidad` sólo aplica la regla del atributo cuando ese dato viene (así el portal no frena a
+  quien aún no cargó su perfil; el backoffice revisa).
+- **Frontend backoffice**: el asistente deshabilita **"Continuar"** (paso Simulación) y los botones
+  **"Guardar borrador"/"Crear y enviar"** cuando la simulación da no elegible; el mensaje pasó de "podés
+  registrarla igual" a "No cumple las condiciones… Ajustá los datos o elegí otra línea para continuar".
+- **Frontend portal**: deshabilita **"Confirmar y enviar solicitud"** con el mismo criterio y avisa que no se
+  puede enviar hasta cumplir las condiciones.
+- **Verificado**: (backend) no elegible → 422 con motivos; elegible → 201. (UI backoffice) "Continuar"
+  deshabilitado con LP-JUB-01 + AGENTE_PUBLICO/40, y re-habilitado al pasar a LP-PERS-01. Tests: se ajustó
+  `test_no_crear_solicitud_no_elegible` (crear no-elegible → 422); `test_solicitudes`+`test_portal` **39 passed**;
+  tsc + candado OK.
+- **Nota (lotes)**: se revisó "Liquidación por lote" — **ya** agrupa por día de originación (`fecha_valor`) y
+  sólo liquida los del mismo día; no requería cambio (era el comportamiento pedido).
+- Caso `solicitud-bloqueo-no-elegible`.
+
+---
+
+## H-201 · Configurar Créditos: la copia independiente retiraba el original
+**Fecha:** 2026-09-18 · **Módulo:** Créditos / Configurar · **Alcance:** bug reportado por el usuario
+- **Síntoma**: al crear un préstamo como **copia independiente** (Nueva línea → "Basar en …" → Copia
+  independiente, o botón Duplicar) y publicarlo, el sistema **retiraba la línea de origen** ("con qué me basé").
+- **Causa**: `publicarCambios` (ConfigurarCreditos.tsx) tras publicar una copia (`copiadoDe`) mostraba
+  "¿Retirar el original?" y, si se confirmaba, llamaba `ppEstado(orig, "retirar")`. Ese paso venía del modelo
+  viejo "nueva versión reemplaza a la anterior", que ya no aplica: una **copia independiente es un préstamo
+  nuevo que coexiste** con su origen (lo que pidió el usuario: "que funcione como préstamo independiente").
+- **Fix**: se eliminó el ofrecimiento/retirada del original al publicar una copia. Publicar una copia ya
+  **no toca** el original; el aviso ahora dice "El original queda intacto (son independientes)". Si se quiere
+  dejar de ofrecer el original, se retira a mano desde su propio menú ("Retirar línea"). `copiado_de` queda
+  sólo para trazabilidad/linaje (comentario del backend actualizado).
+- **Verificado en vivo**: se creó QA-COPIA-H201 basada en LP-PERS-01, se publicó → la copia quedó PUBLICADO
+  y **LP-PERS-01 siguió PUBLICADO** (no retirado); sin prompt de retirar. tsc + candado OK. Datos QA limpiados.
+- Caso `copia-independiente-no-retira-original`.
+
+---
+
 ## H-200 · Auditoría del alta de crédito (pantalla por pantalla): 3 defectos
 **Fecha:** 2026-09-17 · **Módulo:** Créditos / Solicitudes · **Alcance:** pedido del usuario (registrar comportamiento + mejoras/bugs)
 - **Registro de comportamiento** del flujo de alta: (1) *Lista* — header + "＋ Nueva solicitud", filtros por

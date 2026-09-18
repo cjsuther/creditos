@@ -97,12 +97,13 @@ def test_cuatro_ojos_bloquea_autoaprobacion(client):
     assert client.post(f"/api/solicitudes/{sid}/estado", headers=h, json={"accion": "aprobar"}).status_code == 409
 
 
-def test_no_aprobar_solicitud_no_elegible(client):
-    hcred, hadmin = _auth(client, "creditos", "cred123"), _auth(client)
-    # monto fuera de rango -> no elegible
-    sid = client.post("/api/solicitudes", headers=hcred, json=_base(client, hcred, monto_solicitado=50)).json()["id"]
-    client.post(f"/api/solicitudes/{sid}/estado", headers=hcred, json={"accion": "enviar"})
-    assert client.post(f"/api/solicitudes/{sid}/estado", headers=hadmin, json={"accion": "aprobar"}).status_code == 422
+def test_no_crear_solicitud_no_elegible(client):
+    # H-202: si lo declarado NO cumple las condiciones de la línea (acá, monto fuera de rango), no se
+    # puede pedir la solicitud: se rechaza al CREAR (bloqueo duro, mismo criterio que el portal).
+    hcred = _auth(client, "creditos", "cred123")
+    r = client.post("/api/solicitudes", headers=hcred, json=_base(client, hcred, monto_solicitado=50))
+    assert r.status_code == 422, r.text
+    assert "condiciones" in r.json()["detail"].lower()
 
 
 def test_originar_desde_solicitud_aprobada(client):

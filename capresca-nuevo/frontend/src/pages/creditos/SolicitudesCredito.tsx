@@ -354,7 +354,7 @@ export default function SolicitudesCredito() {
                         <div><small>TNA</small><b>{sim.tna}%</b></div>
                       </div>
                       {sim.elegible === false
-                        ? <p className="cfgc-err" style={{ marginTop: 8 }}>No elegible: {sim.motivos.join(" · ")} (podés registrarla igual; un asesor revisa).</p>
+                        ? <p className="cfgc-err" style={{ marginTop: 8 }}>No cumple las condiciones: {sim.motivos.join(" · ")}. Ajustá los datos o elegí otra línea para continuar.</p>
                         : <p className="muted" style={{ marginTop: 8 }}>✓ Elegible con estos datos.</p>}
                     </div>
                   )}
@@ -397,10 +397,10 @@ export default function SolicitudesCredito() {
               <div style={{ flex: 1 }} />
               {paso > 1 && <button className="btn" onClick={() => setPaso(paso - 1)}>← Volver</button>}
               {paso === 1 && <button className="btn primary" disabled={!paso1OK} onClick={() => { setPaso(2); if (!sim) simular(); }}>Continuar →</button>}
-              {paso === 2 && <button className="btn primary" disabled={!paso2OK} onClick={() => setPaso(3)}>Continuar →</button>}
+              {paso === 2 && <button className="btn primary" disabled={!paso2OK || sim?.elegible === false} title={sim?.elegible === false ? "No cumple las condiciones de la línea" : ""} onClick={() => setPaso(3)}>Continuar →</button>}
               {paso === 3 && <>
-                <button className="btn" disabled={creando} onClick={() => crear(false)}>Guardar borrador</button>
-                <button className="btn primary" disabled={creando} onClick={() => crear(true)} title="Crea la solicitud y la manda a evaluación (queda en el Inbox para aprobar)">{creando ? "Creando…" : "Crear y enviar a evaluación"}</button>
+                <button className="btn" disabled={creando || sim?.elegible === false} onClick={() => crear(false)}>Guardar borrador</button>
+                <button className="btn primary" disabled={creando || sim?.elegible === false} onClick={() => crear(true)} title="Crea la solicitud y la manda a evaluación (queda en el Inbox para aprobar)">{creando ? "Creando…" : "Crear y enviar a evaluación"}</button>
               </>}
             </div>
           </div>

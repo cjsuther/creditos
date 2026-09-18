@@ -336,6 +336,14 @@ def enviar_solicitud(req: schemas.PortalSolicitudIn, request: Request,
     if len(dni) not in (7, 8):
         raise HTTPException(422, "El DNI debe tener 7 u 8 dígitos.")
     apellido_nombre = f"{apellido}, {nombre}"
+    # H-202: bloqueo duro por elegibilidad. Si lo declarado por el ciudadano (segmento/edad/antigüedad) NO
+    # cumple las condiciones de la línea, no puede enviar la solicitud. Misma fuente que el simulador; un
+    # dato no declarado no bloquea (queda para la revisión del backoffice).
+    _tmp = m.PPSolicitud(producto_id=prod.id, monto_solicitado=Decimal(str(req.monto)), plazo_solicitado=req.plazo,
+                         segmento=req.segmento or "", canal="WEB", edad=req.edad, antiguedad_meses=req.antiguedad_meses)
+    _ev = _evaluar_solicitud(db, _tmp)
+    if not _ev.get("elegible"):
+        raise HTTPException(422, "No cumplís las condiciones para esta línea: " + "; ".join(_ev.get("motivos", [])))
     destino = _destino_norm(req.destino)
     marca = _marca(c)
     ip = audit.ip_de(request)
