@@ -7,6 +7,47 @@
 
 ---
 
+## H-204 · Tablero de cartera profesional (drill-down) + reorden del menú
+**Fecha:** 2026-09-18 · **Módulo:** Créditos / Tablero · **Alcance:** pedido del usuario
+- **Backend** (`/contratos/tablero`): pasó de agregados básicos a un tablero completo — KPIs (saldo vigente,
+  capital colocado, cobrado, ticket prom., plazo prom., **TNA promedio ponderada por saldo**, **mora $ y %**,
+  recaudado del mes, por-liquidar, vencen 30 días, cuotas), **desglose por estado y por producto** (con mora %),
+  **aging de mora** por tramo (Al día / 1–30 / 31–60 / 61–90 / 90+), **evolución mensual** (originado vs
+  cobrado, 6 meses) y el **detalle de contratos** (con `diasAtraso` y `moraBucket`) que alimenta el drill-down.
+- **Frontend**: dashboard profesional — 8 tarjetas KPI con contexto, **donut** de cartera por estado, barras de
+  **evolución**, tablas de **aging** y **por línea** con barras de participación. **Drill-down**: clic en
+  cualquier segmento (tarjeta, estado, tramo de mora, línea, o chips de acceso rápido) abre el panel de detalle
+  con los contratos de ese segmento (N°, cliente, línea, estado en pill, monto, saldo, días de atraso, próx.
+  venc.). Gráficos en **SVG inline** (sin librerías externas, respeta el candado); CSS scopeado `.tcar-*`.
+- **Reorden del menú** Créditos → Archivos (pedido): **Tablero de cartera, Situación del cliente, Solicitudes
+  de crédito, Liquidación por lote, Caja de créditos, Resumen de cobros, Sistema de cálculos**, y al final
+  Configurar Créditos y Líneas de crédito. "Resumen de cobros" se movió de Reportes a Archivos.
+- **Verificado**: en vivo el tablero renderiza KPIs/donut/evolución/aging/producto y el drill-down por línea y
+  por estado funciona; `test_tablero_cartera` actualizado a la nueva forma (KPIs + listas + detalle);
+  `test_contratos` **45 passed**; tsc + candado OK.
+- Caso `tablero-cartera-pro`.
+
+---
+
+## H-203 · Aprobar exige cliente registrado en el maestro
+**Fecha:** 2026-09-18 · **Módulo:** Créditos / Solicitudes · **Alcance:** pedido del usuario
+- **Requerimiento**: si el cliente **no está registrado** (alta express o solicitud del portal), al querer
+  **aprobar** la solicitud debe avisar que el cliente no existe y que hay que **darlo de alta**.
+- **Backend**: `POST /api/solicitudes/{id}/estado` con `aprobar` devuelve **409** si la solicitud es
+  `NO_REGISTRADO`: "El cliente no está registrado en el maestro. Dalo de alta (o vinculá un cliente existente)
+  antes de aprobar." (Rechazar/Anular no lo exigen.) Registrar = `promover-cliente` (crea/vincula el Cliente
+  y deja la solicitud REGISTRADO).
+- **Frontend**: el panel de detalle muestra el aviso "⚠ El cliente no está registrado en el maestro. Para
+  aprobar, primero Dar de alta en maestro o Vincular cliente." y **deshabilita "Aprobar"** hasta registrarlo;
+  los botones "Dar de alta en maestro" y "Vincular cliente" ya existían.
+- **Verificado**: (API) aprobar sin registrar → 409; tras `promover-cliente` → APROBADA. (UI) en la solicitud
+  real SOL-2026-00006 (express) el botón Aprobar aparece deshabilitado con el aviso. Nuevo test
+  `test_no_aprobar_cliente_no_registrado`; se actualizaron 4 tests del portal para promover antes de aprobar
+  (flujo real); `test_portal`+`test_solicitudes` **40 passed**; tsc + candado OK.
+- Caso `aprobar-exige-cliente-registrado`.
+
+---
+
 ## H-202 · Solicitud: bloqueo duro por no-elegibilidad (backoffice + portal)
 **Fecha:** 2026-09-18 · **Módulo:** Créditos / Solicitudes · **Alcance:** pedido del usuario
 - **Requerimiento**: al pedir la solicitud —tanto por el **canal web** como por el **backoffice**— si no cumple

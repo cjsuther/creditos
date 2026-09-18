@@ -212,6 +212,8 @@ def test_mis_creditos_y_notificaciones(client):
     tok = client.post("/api/auth/login", data={"username": "admin", "password": "admin123"}).json()["access_token"]
     hi = {"Authorization": f"Bearer {tok}"}
     sid = next(s for s in client.get("/api/solicitudes", headers=hi).json()["items"] if s["numero"] == numero)["id"]
+    # H-203: el cliente del portal es NO_REGISTRADO → hay que darlo de alta en el maestro antes de aprobar.
+    client.post(f"/api/solicitudes/{sid}/promover-cliente", headers=hi, json={})
     ap = client.post(f"/api/solicitudes/{sid}/estado", headers=hi, json={"accion": "aprobar"})
     assert ap.status_code == 200 and ap.json()["estado"] == "APROBADA", ap.text
     orig = client.post("/api/contratos/originar", headers=hi, json={
@@ -252,15 +254,18 @@ def test_originacion_web_es_revision_y_bloquea_sin_datos(client):
     dl = s["datosLiquidacion"]
     assert dl["aplica"] is True and dl["lista"] is True, dl
     assert s["clienteDatos"]["dni"] == "30123456"      # el documento de Mi Catamarca viajó (ya no vacío)
+    # H-203: registrar el cliente en el maestro (alta) antes de aprobar.
+    client.post(f"/api/solicitudes/{sid}/promover-cliente", headers=hi, json={})
     client.post(f"/api/solicitudes/{sid}/estado", headers=hi, json={"accion": "aprobar"})
 
-    # Si se pierde un dato obligatorio (DNI), la originación se bloquea con el faltante.
+    # Si se pierde un dato obligatorio (el DNI del cliente en el maestro), la originación se bloquea.
     from app.core.database import SessionLocal
     from app import models_productos as _m
+    from app import models as _mm
     with SessionLocal() as db:
         sol = db.query(_m.PPSolicitud).filter_by(numero=numero).first()
-        cd = dict(sol.cliente_datos or {}); cd["dni"] = ""; sol.cliente_datos = cd
-        db.commit()
+        cli = db.get(_mm.Cliente, sol.cliente_id)
+        cli.dni = ""; db.commit()
     blocked = client.post("/api/contratos/originar", headers=hi, json={
         "producto_id": p["id"], "cliente_nombre": "JUAN CARLOS PEREZ", "monto": 500000, "plazo": body["plazo"],
         "solicitud_pp_id": sid, "desembolsar": True})
@@ -279,6 +284,7 @@ def test_originacion_deja_a_liquidar_y_lote_desembolsa(client):
     tok = client.post("/api/auth/login", data={"username": "admin", "password": "admin123"}).json()["access_token"]
     hi = {"Authorization": f"Bearer {tok}"}
     sid = next(s for s in client.get("/api/solicitudes", headers=hi).json()["items"] if s["numero"] == numero)["id"]
+    client.post(f"/api/solicitudes/{sid}/promover-cliente", headers=hi, json={})   # H-203: alta en maestro antes de aprobar
     client.post(f"/api/solicitudes/{sid}/estado", headers=hi, json={"accion": "aprobar"})
     cto = client.post("/api/contratos/originar", headers=hi, json={
         "producto_id": p["id"], "cliente_nombre": "JUAN CARLOS PEREZ", "monto": 500000, "plazo": 12,
@@ -322,6 +328,24 @@ def test_alta_maestro_completa_cuil(client):
         assert cli.cuil == "20301234567" and cli.dni == "30123456"
 
 
+def test_no_aprobar_cliente_no_registrado(client):
+    """H-203: una solicitud de cliente NO registrado (portal/express) no se puede aprobar hasta darlo de
+    alta en el maestro (o vincular uno existente); recién ahí se aprueba."""
+    h = _ingresar(client)
+    p = _un_producto(client, h)
+    body = {**CONSENT, "producto_id": p["id"], "monto": min(max(500000.0, p["monto_min"]), p["monto_max"]),
+            "plazo": min(max(12, p["plazo_min"]), p["plazo_max"])}
+    numero = client.post("/api/portal/solicitudes", headers={**h, "Idempotency-Key": "noreg-t"}, json=body).json()["numero"]
+    tok = client.post("/api/auth/login", data={"username": "admin", "password": "admin123"}).json()["access_token"]
+    hi = {"Authorization": f"Bearer {tok}"}
+    sid = next(s for s in client.get("/api/solicitudes", headers=hi).json()["items"] if s["numero"] == numero)["id"]
+    r = client.post(f"/api/solicitudes/{sid}/estado", headers=hi, json={"accion": "aprobar"})
+    assert r.status_code == 409 and "registrado" in r.json()["detail"].lower(), r.text
+    client.post(f"/api/solicitudes/{sid}/promover-cliente", headers=hi, json={})
+    ok = client.post(f"/api/solicitudes/{sid}/estado", headers=hi, json={"accion": "aprobar"})
+    assert ok.status_code == 200 and ok.json()["estado"] == "APROBADA", ok.text
+
+
 def test_lote_marca_pendientes_de_aprobacion(client):
     """H-139: con el workflow DESEMBOLSO activo, liquidar el lote deja los contratos esperando aprobación
     (no se desembolsan) y el lote los marca `pendienteAprobacion`."""
@@ -341,6 +365,7 @@ def test_lote_marca_pendientes_de_aprobacion(client):
         tok = client.post("/api/auth/login", data={"username": "admin", "password": "admin123"}).json()["access_token"]
         hi = {"Authorization": f"Bearer {tok}"}
         sid = next(s for s in client.get("/api/solicitudes", headers=hi).json()["items"] if s["numero"] == numero)["id"]
+        client.post(f"/api/solicitudes/{sid}/promover-cliente", headers=hi, json={})   # H-203: alta en maestro antes de aprobar
         client.post(f"/api/solicitudes/{sid}/estado", headers=hi, json={"accion": "aprobar"})
         cto = client.post("/api/contratos/originar", headers=hi, json={
             "producto_id": p["id"], "cliente_nombre": "JUAN CARLOS PEREZ", "monto": 500000, "plazo": 12,

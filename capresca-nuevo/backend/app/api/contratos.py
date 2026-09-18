@@ -4,7 +4,7 @@ Fase 5: ofrecer al cliente sólo productos PUBLICADOS y originar un contrato que
 el snapshot del producto y su cronograma. Fase 6: registrar actividades (pago, prepago,
 payoff, cambio de tasa) sobre el contrato.
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request
@@ -233,45 +233,132 @@ def bundles(db: Session = Depends(get_db)):
 
 @router.get("/tablero")
 def tablero(db: Session = Depends(get_db)):
-    """Tablero de la cartera de contratos pp: totales, estados, cobranza y desglose por línea."""
+    """Tablero de cartera profesional: KPIs, mora/aging por tramo, evolución mensual, desgloses por
+    estado/producto y el detalle de contratos (con días de atraso) para el drill-down del front."""
     contratos = db.query(m.PPContrato).all()
     hoy = date.today()
-    por_estado: dict[str, int] = {}
+    ym = lambda d: f"{d.year:04d}-{d.month:02d}"
+
+    # Cobranza EJECUTADA (para recaudación del mes y la evolución mensual).
+    PAGO_TIPOS = ("PAYMENT", "PAYOFF", "PARTIAL_PREPAYMENT")
+    acts = (db.query(m.PPActividad)
+            .filter(m.PPActividad.estado == "EJECUTADA", m.PPActividad.tipo.in_(PAGO_TIPOS)).all())
+    cobrado_mes: dict[str, Decimal] = {}
+    recaudado_mes = Decimal(0)
+    for a in acts:
+        cobrado_mes[ym(a.fecha)] = cobrado_mes.get(ym(a.fecha), Decimal(0)) + (a.importe or Decimal(0))
+        if a.fecha.year == hoy.year and a.fecha.month == hoy.month:
+            recaudado_mes += a.importe or Decimal(0)
+
+    AGING = ["Al día", "1–30", "31–60", "61–90", "90+"]
+    aging = {b: {"contratos": 0, "saldo": Decimal(0)} for b in AGING}
+    por_estado: dict[str, dict] = {}
     por_prod: dict[str, dict] = {}
-    capital_colocado = saldo_vigente = cobrado = Decimal(0)
-    cuotas_pagadas = cuotas_pend = en_mora = 0
+    orig_mes: dict[str, dict] = {}
+
+    capital = saldo_vig = cobrado_tot = mora_monto = tna_pond = Decimal(0)
+    plazo_tot = cuotas_pag = cuotas_pend = en_mora = vencen30_n = 0
+    vencen30_monto = Decimal(0)
+    detalle: list[dict] = []
+
     for c in contratos:
-        por_estado[c.estado] = por_estado.get(c.estado, 0) + 1
-        capital_colocado += c.monto_original or Decimal(0)
-        if c.estado == "ACTIVO":
-            saldo_vigente += c.saldo_capital or Decimal(0)
-        pd = por_prod.setdefault(c.producto_id, {"codigo": (c.snapshot_producto or {}).get("codigo", ""),
-                                                 "nombre": (c.snapshot_producto or {}).get("producto", ""),
-                                                 "contratos": 0, "saldo": Decimal(0)})
-        pd["contratos"] += 1
-        pd["saldo"] += (c.saldo_capital or Decimal(0)) if c.estado == "ACTIVO" else Decimal(0)
-        vencida_impaga = False
+        snap = c.snapshot_producto or {}
+        activo = c.estado == "ACTIVO"
+        sc = c.saldo_capital or Decimal(0)
+        mo = c.monto_original or Decimal(0)
+        capital += mo
+        plazo_tot += c.plazo or 0
+        pe = por_estado.setdefault(c.estado, {"contratos": 0, "capital": Decimal(0), "saldo": Decimal(0)})
+        pe["contratos"] += 1; pe["capital"] += mo
+        if activo:
+            saldo_vig += sc; pe["saldo"] += sc; tna_pond += (c.tasa_contratada or Decimal(0)) * sc
+        if c.fecha_valor:
+            om = orig_mes.setdefault(ym(c.fecha_valor), {"monto": Decimal(0), "n": 0})
+            om["monto"] += mo; om["n"] += 1
+        # Mora / aging / próximos vencimientos (por cuotas).
+        min_venc = None
         for q in c.cuotas:
             if q.estado == "PAGADA":
-                cuotas_pagadas += 1
-                cobrado += q.pagado or Decimal(0)
+                cuotas_pag += 1; cobrado_tot += q.pagado or Decimal(0)
             else:
                 cuotas_pend += 1
                 if q.fecha_vencimiento < hoy:
-                    vencida_impaga = True
-        if c.estado == "ACTIVO" and vencida_impaga:
-            en_mora += 1
-    return {
-        "contratos": len(contratos),
-        "porEstado": por_estado,
-        "capitalColocado": _fmt(capital_colocado),
-        "saldoVigente": _fmt(saldo_vigente),
-        "cobrado": _fmt(cobrado),
-        "cuotasPagadas": cuotas_pagadas, "cuotasPendientes": cuotas_pend,
+                    min_venc = q.fecha_vencimiento if (min_venc is None or q.fecha_vencimiento < min_venc) else min_venc
+                elif q.fecha_vencimiento <= hoy + timedelta(days=30):
+                    vencen30_monto += q.total or Decimal(0); vencen30_n += 1
+        dias = (hoy - min_venc).days if (activo and min_venc) else 0
+        bucket = "Al día"
+        if activo and dias > 0:
+            bucket = "1–30" if dias <= 30 else "31–60" if dias <= 60 else "61–90" if dias <= 90 else "90+"
+            en_mora += 1; mora_monto += sc
+        if activo:
+            aging[bucket]["contratos"] += 1; aging[bucket]["saldo"] += sc
+        pd = por_prod.setdefault(c.producto_id, {"id": c.producto_id, "codigo": snap.get("codigo", ""),
+              "nombre": snap.get("producto", "") or c.producto_id, "contratos": 0,
+              "capital": Decimal(0), "saldo": Decimal(0), "mora": Decimal(0)})
+        pd["contratos"] += 1; pd["capital"] += mo
+        if activo:
+            pd["saldo"] += sc
+            if dias > 0:
+                pd["mora"] += sc
+        prox = next((q for q in sorted(c.cuotas, key=lambda x: x.numero_cuota) if q.estado != "PAGADA"), None)
+        detalle.append({
+            "id": c.id, "numero": c.numero_contrato, "cliente": c.cliente_nombre,
+            "productoId": c.producto_id, "producto": snap.get("producto", ""), "codigo": snap.get("codigo", ""),
+            "estado": c.estado, "sistema": c.sistema, "monto": _fmt(mo), "saldo": _fmt(sc),
+            "tna": _fmt(c.tasa_contratada), "plazo": c.plazo, "diasAtraso": dias, "moraBucket": bucket,
+            "fechaAlta": str(c.fecha_valor) if c.fecha_valor else "",
+            "proxVenc": str(prox.fecha_vencimiento) if prox else "",
+            "proxCuota": prox.numero_cuota if prox else None,
+        })
+
+    n = len(contratos)
+    activos = por_estado.get("ACTIVO", {}).get("contratos", 0)
+    a_liq = por_estado.get("A_LIQUIDAR", {})
+    # Evolución: últimos 6 meses (originación vs cobranza).
+    seq: list[str] = []
+    yy, mm = hoy.year, hoy.month
+    for i in range(5, -1, -1):
+        m2, y2 = mm - i, yy
+        while m2 <= 0:
+            m2 += 12; y2 -= 1
+        seq.append(f"{y2:04d}-{m2:02d}")
+    evolucion = [{"mes": k, "originadoMonto": _fmt(orig_mes.get(k, {}).get("monto", 0)),
+                  "originadoN": orig_mes.get(k, {}).get("n", 0), "cobradoMonto": _fmt(cobrado_mes.get(k, 0))}
+                 for k in seq]
+
+    kpis = {
+        "contratos": n, "activos": activos,
+        "aLiquidarN": a_liq.get("contratos", 0), "aLiquidarMonto": _fmt(a_liq.get("capital", 0)),
+        "capitalColocado": _fmt(capital), "saldoVigente": _fmt(saldo_vig), "cobrado": _fmt(cobrado_tot),
+        "ticketPromedio": _fmt(capital / n) if n else 0,
+        "plazoPromedio": round(plazo_tot / n, 1) if n else 0,
+        "tnaPromedioPond": round(float(tna_pond / saldo_vig), 2) if saldo_vig else 0,
+        "moraMonto": _fmt(mora_monto),
+        "moraPct": round(float(mora_monto / saldo_vig * 100), 1) if saldo_vig else 0,
         "contratosEnMora": en_mora,
-        "porProducto": sorted(
-            [{**v, "saldo": _fmt(v["saldo"])} for v in por_prod.values()],
-            key=lambda x: x["saldo"], reverse=True),
+        "moraPctContratos": round(en_mora / activos * 100, 1) if activos else 0,
+        "recaudadoMes": _fmt(recaudado_mes),
+        "vencen30Monto": _fmt(vencen30_monto), "vencen30Cuotas": vencen30_n,
+        "cuotasPagadas": cuotas_pag, "cuotasPendientes": cuotas_pend,
+    }
+    return {
+        "generadoEn": str(hoy),
+        "kpis": kpis,
+        "porEstado": sorted([{"estado": k, "contratos": v["contratos"], "capital": _fmt(v["capital"]),
+                              "saldo": _fmt(v["saldo"])} for k, v in por_estado.items()],
+                            key=lambda x: x["saldo"], reverse=True),
+        "aging": [{"bucket": b, "contratos": aging[b]["contratos"], "saldo": _fmt(aging[b]["saldo"])} for b in AGING],
+        "porProducto": sorted([{"id": v["id"], "codigo": v["codigo"], "nombre": v["nombre"],
+                                "contratos": v["contratos"], "capital": _fmt(v["capital"]), "saldo": _fmt(v["saldo"]),
+                                "mora": _fmt(v["mora"]),
+                                "moraPct": round(float(v["mora"] / v["saldo"] * 100), 1) if v["saldo"] else 0}
+                               for v in por_prod.values()], key=lambda x: x["saldo"], reverse=True),
+        "evolucion": evolucion,
+        "contratos": detalle,
+        # Compat con claves antiguas.
+        "contratosTotal": n, "capitalColocado": _fmt(capital), "saldoVigente": _fmt(saldo_vig),
+        "cobrado": _fmt(cobrado_tot), "contratosEnMora": en_mora,
     }
 
 

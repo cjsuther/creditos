@@ -511,6 +511,9 @@ export default function SolicitudesCredito() {
                 </label>
               )}
               {sel.estado === "ORIGINADA" && sel.contratoId && <p style={{ marginTop: 12 }}><span className="pill brand">Originada · contrato {sel.contratoId.slice(0, 8)}</span></p>}
+              {sel.estado === "EN_EVALUACION" && sel.solicitanteTipo === "NO_REGISTRADO" && (
+                <p className="cfgc-err" style={{ marginTop: 12 }}>⚠ El cliente <b>no está registrado</b> en el maestro. Para aprobar, primero <b>Dar de alta en maestro</b> o <b>Vincular cliente</b>.</p>
+              )}
             </div>
             <div className="sol-modal-foot" style={{ flexWrap: "wrap" }}>
               <button className="btn" onClick={() => setSel(null)}>Cerrar</button>
@@ -523,7 +526,9 @@ export default function SolicitudesCredito() {
               {!["ORIGINADA", "ANULADA"].includes(sel.estado) && <button className="btn" disabled={accionando || !puedeEditar} title="Baja administrativa del trámite (error de carga, duplicada o el cliente desistió). No es una decisión crediticia." onClick={() => resolver("anular")}>Anular</button>}
               {sel.estado === "EN_EVALUACION" && <>
                 <button className="btn" disabled={accionando || !puedeAprobar} title="Decisión crediticia NEGATIVA: se evaluó y se deniega. Requiere rol aprobador y motivo (Observación)." onClick={() => resolver("rechazar")}>Rechazar</button>
-                <button className="btn primary" disabled={accionando || !puedeAprobar} title="Aprueba el crédito (decisión crediticia). Requiere rol aprobador." onClick={() => resolver("aprobar")}>Aprobar</button>
+                <button className="btn primary" disabled={accionando || !puedeAprobar || sel.solicitanteTipo === "NO_REGISTRADO"}
+                  title={sel.solicitanteTipo === "NO_REGISTRADO" ? "El cliente no está registrado en el maestro: dalo de alta o vinculá uno existente antes de aprobar." : "Aprueba el crédito (decisión crediticia). Requiere rol aprobador."}
+                  onClick={() => resolver("aprobar")}>Aprobar</button>
               </>}
               {sel.estado === "APROBADA" && <button className="btn primary" disabled={accionando || (sel.datosLiquidacion?.aplica && !sel.datosLiquidacion?.lista)}
                 title={sel.datosLiquidacion?.aplica && !sel.datosLiquidacion?.lista ? "Faltan datos para liquidar" : ""}

@@ -293,6 +293,12 @@ def cambiar_estado(sid: str, data: AccionIn, db: Session = Depends(get_db),
             s.estado = "RECHAZADA"; s.motivo_rechazo = data.motivo or "Sin motivo"; s.resuelta_por = user.username
             wf.limpiar_aprobaciones(db, "SOLICITUD", s.id)
         else:
+            # H-203: no se puede aprobar la solicitud de un cliente NO registrado en el maestro (alta express
+            # o solicitud del portal aún sin promover). El asesor debe darlo de alta —o vincular un cliente
+            # existente— con "promover-cliente" antes de aprobar.
+            if s.solicitante_tipo == "NO_REGISTRADO":
+                raise HTTPException(409, "El cliente no está registrado en el maestro. Dalo de alta "
+                                         "(o vinculá un cliente existente) antes de aprobar la solicitud.")
             # Cadena de N niveles: cada aprobación avanza; sólo la última pasa a APROBADA.
             paso = wf.aprobar_paso(db, "SOLICITUD", s.id, user, s.enviada_por)
             if not paso["ok"]:

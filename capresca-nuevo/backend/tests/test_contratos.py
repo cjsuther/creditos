@@ -419,21 +419,26 @@ def test_originar_desde_solicitud_legacy(client):
 
 
 def test_tablero_cartera(client):
-    """Tablero de cartera: agrega contratos, saldos y cobranza tras originar y pagar."""
+    """Tablero de cartera: KPIs, desglose por estado/producto y detalle para drill-down tras originar y pagar."""
     h = _auth(client)
     p = _pers(client, h)
-    t0 = client.get("/api/contratos/tablero", headers=h).json()
-    base_n = t0["contratos"]
+    base_n = client.get("/api/contratos/tablero", headers=h).json()["kpis"]["contratos"]
     c = client.post("/api/contratos/originar", headers=h,
                     json={"producto_id": p["id"], "cliente_nombre": "TAB", "monto": 1000000, "plazo": 12}).json()
     client.post(f"/api/contratos/{c['id']}/actividad", headers=h, json={"tipo": "PAYMENT"})
     t = client.get("/api/contratos/tablero", headers=h).json()
-    assert t["contratos"] == base_n + 1
-    assert t["capitalColocado"] >= 1000000
-    assert t["saldoVigente"] > 0 and t["saldoVigente"] < 1000000  # bajó tras el pago
-    assert t["cuotasPagadas"] >= 1 and t["cobrado"] > 0
-    assert t["porEstado"].get("ACTIVO", 0) >= 1
+    k = t["kpis"]
+    assert k["contratos"] == base_n + 1
+    assert k["capitalColocado"] >= 1000000
+    assert 0 < k["saldoVigente"] < 1000000  # bajó tras el pago
+    assert k["cuotasPagadas"] >= 1 and k["cobrado"] > 0
+    # nuevos agregados: por estado/producto son listas; aging y evolución están presentes.
+    assert any(e["estado"] == "ACTIVO" and e["contratos"] >= 1 for e in t["porEstado"])
     assert any(pp["codigo"] == "LP-PERS-01" and pp["contratos"] >= 1 for pp in t["porProducto"])
+    assert len(t["aging"]) == 5 and len(t["evolucion"]) == 6
+    # el detalle para el drill-down trae el contrato con su bucket de mora y días de atraso.
+    row = next(r for r in t["contratos"] if r["numero"] == c["numero_contrato"])
+    assert "moraBucket" in row and "diasAtraso" in row and row["estado"] == "ACTIVO"
 
 
 def test_preview_coincide_con_contrato_originado(client):

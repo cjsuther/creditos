@@ -60,14 +60,15 @@ export const MENU: Modulo[] = [
   {
     label: "Créditos", icon: "creditos", soloNuevos: true, grupos: [
       { label: "Archivos", items: [
-        { to: "/creditos/lineas", label: "Líneas de crédito" },
-        { to: "/creditos/configurar", label: "Configurar Créditos", nuevo: true },
+        { to: "/creditos/tablero-cartera", label: "Tablero de cartera", nuevo: true },
+        { to: "/creditos/situacion-linea", label: "Situación del cliente", nuevo: true },
         { to: "/creditos/solicitudes-credito", label: "Solicitudes de crédito", nuevo: true },
         { to: "/creditos/liquidacion-lote", label: "Liquidación por lote", nuevo: true },
         { to: "/creditos/caja", label: "Caja de créditos", nuevo: true },
-        { to: "/creditos/situacion-linea", label: "Situación del cliente", nuevo: true },
-        { to: "/creditos/tablero-cartera", label: "Tablero de cartera", nuevo: true },
+        { to: "/creditos/resumen-cobros", label: "Resumen de cobros", nuevo: true },
         { to: "/creditos/sistema-calculos", label: "Sistema de cálculos", nuevo: true },
+        { to: "/creditos/configurar", label: "Configurar Créditos", nuevo: true },
+        { to: "/creditos/lineas", label: "Líneas de crédito" },
       ] },
       { label: "Datos", items: [
         { to: "/creditos/solicitudes", label: "Solicitudes" },
@@ -91,7 +92,6 @@ export const MENU: Modulo[] = [
         { to: "/creditos/envios", label: "Envíos (padrón de débito)" },
       ] },
       { label: "Reportes", items: [
-        { to: "/creditos/resumen-cobros", label: "Resumen de cobros", nuevo: true },
         { to: "/creditos/informe", label: "Informe de créditos" },
         { to: "/creditos/listado", label: "Listado de créditos" },
         { to: "/creditos/mora", label: "Cuotas en mora" },
