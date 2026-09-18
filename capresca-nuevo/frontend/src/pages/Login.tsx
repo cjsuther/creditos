@@ -16,7 +16,7 @@ export default function Login() {
       const r = await login(username, password);
       setToken(r.access_token);
       invalidarPermisos();        // releer permisos del nuevo usuario (no reusar la caché anterior)
-      nav("/simulador");
+      nav("/creditos/inbox-aprobaciones");   // al ingresar, directo al Inbox (cuadro de control)
     } catch (err: any) {
       setError(err.message);
     }

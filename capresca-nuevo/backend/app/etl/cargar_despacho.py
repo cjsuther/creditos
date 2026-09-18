@@ -10,12 +10,13 @@ Uso:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import datetime
 
 from app.core.database import SessionLocal
 from app.etl.dbf import DbfReader
-from app.etl.rtf import rtf_a_texto
+from app.etl.rtf import rtf_a_html
 from app import models
 
 
@@ -66,7 +67,7 @@ def cargar(bases: str):
                 cod = I(x.get("cod_mod"))
                 if not cod:
                     continue
-                plantilla = rtf_a_texto(x.get("modelo") or "")
+                plantilla = rtf_a_html(x.get("modelo") or "")
                 rows.append({
                     "tipo_res": I(x.get("tipo_res")), "codigo": cod,
                     "descripcion": S(x.get("des_mod"))[:120],
@@ -111,13 +112,15 @@ def cargar(bases: str):
             vistos[clave] = len(rows)
             nreal = I(x.get("nro_real")) or None
             freal = x.get("fec_real"); freal = freal if isinstance(freal, datetime.date) else None
-            texto = rtf_a_texto(x.get("texto") or "")
+            texto = rtf_a_html(x.get("texto") or "")
+            plano = re.sub(r"<[^>]+>", " ", texto).strip()   # para asunto: sin tags HTML
+            motivo = motmap.get(I(x.get("cod_mot")), "")[:120]
             rows.append({
                 "numero": nro, "anio": anio, "tipo": tipo,
                 "fecha": fec if isinstance(fec, datetime.date) else datetime.date(anio, 1, 1),
                 "numero_real": nreal, "fecha_real": freal,
-                "organo": "", "asunto": (texto[:120] or f"{tipo} {nro}/{anio}"),
-                "motivo_cod": I(x.get("cod_mot")), "motivo": motmap.get(I(x.get("cod_mot")), "")[:120],
+                "organo": "", "asunto": (motivo or plano[:120] or f"{tipo} {nro}/{anio}"),
+                "motivo_cod": I(x.get("cod_mot")), "motivo": motivo,
                 "importe": F(x.get("importe")),
                 "modelo_codigo": I(x.get("cod_mot")) or None,   # COD_MOT == código del modelo usado
                 "origen": _origen(x)[:40],

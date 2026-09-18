@@ -22,7 +22,7 @@ export const MENU: Modulo[] = [
   {
     label: "Despacho", icon: "despacho", oculto: true, grupos: [
       { label: "Archivos", items: [
-        { to: "/despacho/modelos", label: "Modelos de resoluciones" },
+        { to: "/despacho/modelos", label: "Modelos de resoluciones", nuevo: true },
       ] },
       { label: "Datos", items: [
         { to: "/despacho/resoluciones", label: "Resoluciones y disposiciones", nuevo: true },
@@ -63,11 +63,9 @@ export const MENU: Modulo[] = [
         { to: "/creditos/lineas", label: "Líneas de crédito" },
         { to: "/creditos/configurar", label: "Configurar Créditos", nuevo: true },
         { to: "/creditos/solicitudes-credito", label: "Solicitudes de crédito", nuevo: true },
-        { to: "/creditos/originar", label: "Originar Crédito (oferta)", nuevo: true },
         { to: "/creditos/liquidacion-lote", label: "Liquidación por lote", nuevo: true },
         { to: "/creditos/caja", label: "Caja de créditos", nuevo: true },
         { to: "/creditos/situacion-linea", label: "Situación del cliente", nuevo: true },
-        { to: "/creditos/inbox-aprobaciones", label: "Inbox de aprobaciones", nuevo: true },
         { to: "/creditos/tablero-cartera", label: "Tablero de cartera", nuevo: true },
         { to: "/creditos/sistema-calculos", label: "Sistema de cálculos", nuevo: true },
       ] },
@@ -128,11 +126,16 @@ export const MENU: Modulo[] = [
   {
     label: "Contabilidad", icon: "contabilidad", grupos: [
       { label: "Archivos", items: [
+        { to: "/contabilidad/plan-cuentas", label: "Plan de cuentas", nuevo: true },
+        { to: "/contabilidad/ejercicios", label: "Ejercicios contables", nuevo: true },
+        { to: "/contabilidad/centros-costo", label: "Centros de costo", nuevo: true },
+        { to: "/contabilidad/imputaciones", label: "Parametrización contable", nuevo: true },
         { to: "/contabilidad/impuestos", label: "Impuestos", nuevo: true },
         { to: "/contabilidad/indices", label: "Índices de referencia", nuevo: true },
         { to: "/contabilidad/feriados", label: "Feriados (calendario)", nuevo: true },
       ] },
       { label: "Asientos", items: [
+        { to: "/contabilidad/asientos", label: "Asientos manuales", nuevo: true },
         { to: "/contabilidad/mayor", label: "Balance / Mayor (real)" },
         { to: "/contabilidad/libro-diario", label: "Libro diario (app)" },
         { to: "/contabilidad/balance", label: "Balance (asientos app)" },
@@ -142,6 +145,8 @@ export const MENU: Modulo[] = [
         { to: "/contabilidad/general", label: "Contabilidad general (caja/juegos)" },
       ] },
       { label: "Reportes", items: [
+        { to: "/contabilidad/estados", label: "Estados contables", nuevo: true },
+        { to: "/contabilidad/conciliacion", label: "Conciliación bancaria", nuevo: true },
         { to: "/contabilidad/iva-cuotas", label: "IVA de cuotas cobradas (real)" },
         { to: "/contabilidad/iva", label: "IVA por período (app)" },
         { to: "/contabilidad/cierre", label: "Cierre de caja" },
@@ -191,6 +196,7 @@ export const MENU: Modulo[] = [
     label: "General", icon: "general", grupos: [
       { label: "Archivos", items: [
         { to: "/general/parametros", label: "Parámetros generales" },
+        { to: "/creditos/parametros", label: "Parámetros de créditos", nuevo: true },
         { to: "/general/organismos", label: "Organismos" },
         { to: "/general/oficinas", label: "Oficinas" },
         { to: "/general/companias", label: "Compañías de seguros" },

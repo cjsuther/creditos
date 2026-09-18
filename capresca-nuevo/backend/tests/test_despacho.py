@@ -60,6 +60,59 @@ def test_resolucion_modelo_beneficiarios_y_numero_real(client):
         "tipo": "RES", "modelo_codigo": 900, "beneficiarios": [{"nombre": ""}]}).status_code == 422
 
 
+def test_resolucion_editar_borrador(client):
+    """H-168: un borrador se puede editar (texto, modelo→motivo, importe, origen, beneficiarios) sin
+    cambiar tipo/número/año; una vez OFICIAL (Nº Real) queda inmutable (422)."""
+    from app.core.database import SessionLocal
+    from app import models as m
+    with SessionLocal() as db:
+        db.add(m.ModeloResolucion(codigo=910, descripcion="SUBSIDIO"))
+        db.add(m.ModeloResolucion(codigo=911, descripcion="AYUDA ECONOMICA")); db.commit()
+    h = _auth(client)
+    r = client.post("/api/despacho/resoluciones", headers=h, json={
+        "tipo": "RES", "fecha": "2026-07-01", "modelo_codigo": 910, "importe": 1000,
+        "beneficiarios": [{"nombre": "UNO"}]}).json()
+    n0 = r["numero"]
+    assert r["motivo"] == "SUBSIDIO" and float(r["importe"]) == 1000
+
+    # editar: cambia modelo (motivo), texto, importe, origen y reemplaza beneficiarios
+    e = client.put(f"/api/despacho/resoluciones/{r['id']}", headers=h, json={
+        "modelo_codigo": 911, "texto": "<h2>VISTO</h2><p>Nuevo cuerpo.</p>", "importe": 2500.75,
+        "origen": "E20 9/2026",
+        "beneficiarios": [{"tipo_doc": 1, "nro_doc": "30111222", "nombre": "DOS"}, {"nombre": "TRES"}]})
+    assert e.status_code == 200
+    ed = e.json()
+    assert ed["numero"] == n0 and ed["tipo"] == "RES" and ed["anio"] == 2026   # no cambia la serie
+    assert ed["motivo"] == "AYUDA ECONOMICA" and float(ed["importe"]) == 2500.75
+    assert ed["origen"] == "E20 9/2026" and "Nuevo cuerpo" in ed["texto"]
+    assert len(ed["beneficiarios"]) == 2 and {b["nombre"] for b in ed["beneficiarios"]} == {"DOS", "TRES"}
+
+    # una vez con Nº Real (oficial) ya no se puede editar
+    client.post(f"/api/despacho/resoluciones/{r['id']}/numero-real", headers=h, json={})
+    bad = client.put(f"/api/despacho/resoluciones/{r['id']}", headers=h, json={"importe": 5})
+    assert bad.status_code == 422 and "oficial" in bad.json()["detail"].lower()
+
+
+def test_resolucion_word_nombre_y_html(client):
+    """H-166: el Word usa el nombre institucional correcto (PRESTACIONES, no 'Previsión Popular') y
+    renderiza el texto HTML del editor mini-Word (títulos/negrita), sin duplicar el título."""
+    import io, zipfile, re
+    from app.core.database import SessionLocal
+    from app import models as m
+    with SessionLocal() as db:
+        db.add(m.ModeloResolucion(codigo=901, descripcion="AYUDA SOCIAL")); db.commit()
+    h = _auth(client)
+    r = client.post("/api/despacho/resoluciones", headers=h, json={
+        "tipo": "RES", "modelo_codigo": 901,
+        "texto": "<h2>VISTO</h2><p>El <b>expediente X</b>.</p><h2>RESUELVE</h2><p>Art. 1.</p>"}).json()
+    docx = client.get(f"/api/despacho/resoluciones/{r['id']}/word", headers=h)
+    assert docx.status_code == 200 and docx.headers["content-type"].startswith("application/vnd")
+    xml = re.sub("<[^>]+>", " ", zipfile.ZipFile(io.BytesIO(docx.content)).read("word/document.xml").decode("utf-8", "ignore"))
+    assert "PRESTACIONES" in xml and "Previsión Popular" not in xml   # nombre correcto
+    assert "AYUDA SOCIAL" in xml                                       # motivo como subtítulo
+    assert "VISTO" in xml and "RESUELVE" in xml and "expediente X" in xml   # HTML renderizado
+
+
 def test_expediente_con_pases(client):
     h = _auth(client)
     exp = client.post("/api/despacho/expedientes", headers=h, json={
@@ -123,6 +176,36 @@ def test_modelos_resolucion(client):
     # búsqueda
     r2 = client.get("/api/despacho/modelos?q=AYUDAS", headers=h).json()
     assert len(r2) >= 1
+
+
+def test_modelo_abm_crear_editar(client):
+    """H-167: los modelos de resolución se crean y editan desde la ABM con el mismo editor mini-Word.
+    El código se asigna solo (MAX+1), el tipo mapea a disposición/resolución y la plantilla se guarda
+    como HTML (tiene_plantilla refleja si hay contenido)."""
+    h = _auth(client)
+    prev = client.get("/api/despacho/modelos", headers=h).json()
+    prev_max = max((x["codigo"] for x in prev), default=0)
+
+    # alta: código autoasignado, disposición, plantilla HTML del editor
+    r = client.post("/api/despacho/modelos", headers=h, json={
+        "descripcion": "acta volante qa", "tipo": "DIS", "seguros": True,
+        "plantilla": "<h2>VISTO</h2><p>Cuerpo base.</p>"})
+    assert r.status_code == 201
+    m = r.json()
+    assert m["codigo"] == prev_max + 1 and m["descripcion"] == "ACTA VOLANTE QA"
+    assert m["tipo"] == "Disposición" and m["es_seguros"] is True and m["tiene_plantilla"] is True
+
+    # edición: cambia descripción/tipo y vacía la plantilla
+    e = client.put(f"/api/despacho/modelos/{m['id']}", headers=h, json={
+        "descripcion": "acta editada", "tipo": "RES", "seguros": False, "plantilla": ""}).json()
+    assert e["descripcion"] == "ACTA EDITADA" and e["tipo"] == "Resolución"
+    assert e["es_seguros"] is False and e["tiene_plantilla"] is False and e["codigo"] == m["codigo"]
+
+    # persistió y sigue accesible por id
+    det = client.get(f"/api/despacho/modelos/{m['id']}", headers=h).json()
+    assert det["descripcion"] == "ACTA EDITADA" and det["plantilla"] == ""
+    # descripción vacía es inválida (422)
+    assert client.post("/api/despacho/modelos", headers=h, json={"descripcion": "  "}).status_code == 422
 
 
 def test_anexo_resolucion_lote(client):

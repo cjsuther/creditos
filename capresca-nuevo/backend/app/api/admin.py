@@ -135,8 +135,12 @@ def crear_compania(data: schemas.CompaniaUpsert, db: Session = Depends(get_db)):
 
 # ---------------- Parámetros generales ----------------
 @router.get("/parametros", response_model=list[schemas.ParametroOut])
-def parametros(db: Session = Depends(get_db)):
-    return db.scalars(select(models.Parametro).order_by(models.Parametro.clave)).all()
+def parametros(ambito: str | None = None, db: Session = Depends(get_db)):
+    """Parámetros. Filtrables por ámbito (general|creditos|contabilidad) — H-197."""
+    qy = select(models.Parametro)
+    if ambito:
+        qy = qy.where(models.Parametro.ambito == ambito)
+    return db.scalars(qy.order_by(models.Parametro.clave)).all()
 
 
 @router.post("/parametros", response_model=schemas.ParametroOut, status_code=201)
@@ -145,6 +149,8 @@ def upsert_parametro(data: schemas.ParametroUpsert, db: Session = Depends(get_db
     if p:
         p.valor = data.valor
         p.descripcion = data.descripcion
+        if data.ambito:
+            p.ambito = data.ambito
     else:
         p = models.Parametro(**data.model_dump())
         db.add(p)

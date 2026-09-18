@@ -175,6 +175,56 @@ def test_originar_respeta_disponibilidad(client):
     assert ok.status_code == 201, ok.text
 
 
+def _web_only(client, h):
+    """Crea y publica un producto cuyo único canal habilitado es WEB (solo portal)."""
+    pid = client.post("/api/productos", headers=h, json={"nombre": "Prestamo Web QA"}).json()["id"]
+    det = client.get(f"/api/productos/{pid}", headers=h).json()
+    comps = [{"codigo": c["codigo"], "config": c["config"], "activo": c["activo"], "heredado": c.get("heredado", False)}
+             for c in det["componentes"]]
+    av = next((c for c in comps if c["codigo"] == "AVAILABILITY"), None)
+    if av is None:
+        av = {"codigo": "AVAILABILITY", "config": {}, "activo": True, "heredado": False}; comps.append(av)
+    av["activo"] = True
+    av["config"] = {**(av["config"] or {}), "canales": ["WEB"]}
+    r = client.put(f"/api/productos/{pid}/config", headers=h, json={**det["cfg"], "componentes": comps})
+    assert r.status_code == 200, r.text
+    for acc in ("revisar", "aprobar", "publicar"):
+        rr = client.post(f"/api/productos/{pid}/estado", headers=h, json={"accion": acc})
+        assert rr.status_code == 200, (acc, rr.text)
+    return pid
+
+
+def test_web_only_no_se_origina_desde_backoffice(client):
+    """H-184: un producto 'solo WEB' no debe poder originarse desde el backoffice como venta de sucursal,
+    ni siquiera dejando el canal vacío (antes, canal vacío salteaba el chequeo de disponibilidad)."""
+    h = _auth(client)
+    pid = _web_only(client, h)
+    # confirmar que el producto quedó solo-WEB
+    det = client.get(f"/api/productos/{pid}", headers=h).json()
+    assert det["disponibilidad"]["canales"] == ["WEB"]
+    base = {"producto_id": pid, "cliente_nombre": "GOMEZ", "monto": 1000000, "plazo": 24}
+    # canal SUCURSAL → 422 (control explícito)
+    assert client.post("/api/contratos/originar", headers=h, json={**base, "canal": "SUCURSAL"}).status_code == 422
+    # canal VACÍO/omitido → 422 (loophole cerrado: default backoffice = SUCURSAL)
+    r_vacio = client.post("/api/contratos/originar", headers=h, json=base)
+    assert r_vacio.status_code == 422, r_vacio.text
+    # canal WEB explícito → 201 (procesar el canal legítimo sí se permite)
+    r_web = client.post("/api/contratos/originar", headers=h, json={**base, "canal": "WEB", "desembolsar": False})
+    assert r_web.status_code == 201, r_web.text
+
+
+def test_oferta_backoffice_filtra_por_canal(client):
+    """H-185: la oferta del backoffice esconde (filtro duro) un producto solo-WEB cuando el operador
+    origina por un canal donde no está habilitado; con canal WEB o sin canal, aparece."""
+    h = _auth(client)
+    pid = _web_only(client, h)
+    def cods(qs=""):
+        return {p["id"] for p in client.get(f"/api/contratos/oferta{qs}", headers=h).json()["items"]}
+    assert pid not in cods("?canal=SUCURSAL")   # solo-WEB no se lista en canal sucursal
+    assert pid in cods("?canal=WEB")            # sí en canal web
+    assert pid in cods()                         # sin canal: catálogo completo
+
+
 def test_backdating_y_reversa(client):
     """Fase F: pago con fecha valor pasada y reversa que deshace el efecto (recompute)."""
     h = _auth(client)

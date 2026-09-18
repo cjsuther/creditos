@@ -499,3 +499,85 @@ def test_mis_solicitudes_solo_las_propias(client):
     # Realm: un token interno no puede usar el endpoint del portal.
     tok = client.post("/api/auth/login", data={"username": "admin", "password": "admin123"}).json()["access_token"]
     assert client.get("/api/portal/solicitudes", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
+
+
+def _bo(client):
+    tok = client.post("/api/auth/login", data={"username": "admin", "password": "admin123"}).json()["access_token"]
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def _publicar_con_canales(client, hb, nombre, canales):
+    """Crea y publica (backoffice) un producto con Disponibilidad → canales dados."""
+    pid = client.post("/api/productos", headers=hb, json={"nombre": nombre}).json()["id"]
+    det = client.get(f"/api/productos/{pid}", headers=hb).json()
+    comps = [{"codigo": c["codigo"], "config": c["config"], "activo": c["activo"], "heredado": c.get("heredado", False)}
+             for c in det["componentes"]]
+    av = next((c for c in comps if c["codigo"] == "AVAILABILITY"), None)
+    if av is None:
+        av = {"codigo": "AVAILABILITY", "config": {}, "activo": True, "heredado": False}; comps.append(av)
+    av["activo"] = True
+    av["config"] = {**(av["config"] or {}), "canales": canales}
+    assert client.put(f"/api/productos/{pid}/config", headers=hb, json={**det["cfg"], "componentes": comps}).status_code == 200
+    for acc in ("revisar", "aprobar", "publicar"):
+        assert client.post(f"/api/productos/{pid}/estado", headers=hb, json={"accion": acc}).status_code == 200
+    return pid
+
+
+def test_canal_web_filtra_portal_y_es_configurable(client):
+    """H-185: el portal sólo lista/acepta productos habilitados en el canal del portal (Parámetro
+    CANAL_PORTAL, configurable). Un producto sólo-SUCURSAL no se ve ni se puede solicitar desde la web;
+    cambiar el parámetro cambia qué canal habilita el portal."""
+    hb = _bo(client)
+    hp = _ingresar(client)
+    pid_web = _publicar_con_canales(client, hb, "Solo Web QA", ["WEB"])
+    pid_suc = _publicar_con_canales(client, hb, "Solo Sucursal QA", ["SUCURSAL"])
+
+    ids = {p["id"] for p in client.get("/api/portal/productos", headers=hp).json()}
+    assert pid_web in ids            # web-only aparece
+    assert pid_suc not in ids        # sucursal-only NO aparece en el portal
+
+    # Guarda dura: aunque conozca el id, no puede solicitar el sucursal-only por la web.
+    r = client.post("/api/portal/solicitudes", headers=hp, json={
+        "producto_id": pid_suc, "monto": 500000, "plazo": 12, "apellido": "Perez", "nombre": "Juan",
+        "dni": "30123456", "cbu": "2850590940090418135201", "acepta_terminos": True, "acepta_datos": True})
+    assert r.status_code == 422 and "canal" in r.text.lower()
+
+    # Configurable: si el canal del portal pasa a SUCURSAL, se invierte qué producto se ofrece.
+    assert client.post("/api/admin/parametros", headers=hb, json={"clave": "CANAL_PORTAL", "valor": "SUCURSAL"}).status_code == 201
+    ids2 = {p["id"] for p in client.get("/api/portal/productos", headers=hp).json()}
+    assert pid_suc in ids2 and pid_web not in ids2
+    # restaurar
+    client.post("/api/admin/parametros", headers=hb, json={"clave": "CANAL_PORTAL", "valor": "WEB"})
+
+
+def test_portal_no_muestra_sin_disponibilidad(client):
+    """H-189: OPT-IN público — un producto con la Disponibilidad NO configurada (componente inactivo) NO
+    aparece en el portal; al activarla con el canal del portal, aparece. Y la disponibilidad se puede
+    EDITAR aunque la línea esté publicada (sin crear versión nueva)."""
+    hb = _bo(client)
+    hp = _ingresar(client)
+    # producto publicado SIN disponibilidad (se crea con AVAILABILITY inactiva por defecto)
+    pid = client.post("/api/productos", headers=hb, json={"nombre": "Sin Disp QA"}).json()["id"]
+    det = client.get(f"/api/productos/{pid}", headers=hb).json()
+    comps = [{"codigo": c["codigo"], "config": c["config"], "activo": c["activo"], "heredado": c.get("heredado", False)}
+             for c in det["componentes"] if c["codigo"] != "AVAILABILITY"]   # sin availability
+    client.put(f"/api/productos/{pid}/config", headers=hb, json={**det["cfg"], "componentes": comps})
+    for acc in ("revisar", "aprobar", "publicar"):
+        assert client.post(f"/api/productos/{pid}/estado", headers=hb, json={"accion": acc}).status_code == 200
+
+    ids = {p["id"] for p in client.get("/api/portal/productos", headers=hp).json()}
+    assert pid not in ids   # sin disponibilidad configurada → NO se ofrece por el portal
+    # tampoco se puede solicitar
+    r = client.post("/api/portal/solicitudes", headers=hp, json={
+        "producto_id": pid, "monto": 500000, "plazo": 12, "apellido": "P", "nombre": "J", "dni": "30123456",
+        "cbu": "2850590940090418135201", "acepta_terminos": True, "acepta_datos": True})
+    assert r.status_code == 422
+
+    # H-189: editar la disponibilidad de la línea PUBLICADA (activarla con canal WEB) sin versión nueva
+    r2 = client.put(f"/api/productos/{pid}/disponibilidad", headers=hb, json={"activo": True, "canales": ["WEB"]})
+    assert r2.status_code == 200
+    det2 = client.get(f"/api/productos/{pid}", headers=hb).json()
+    assert det2["estado"] == "PUBLICADO" and det2["disponibilidad"]["canales"] == ["WEB"]
+    # ahora sí aparece en el portal
+    ids2 = {p["id"] for p in client.get("/api/portal/productos", headers=hp).json()}
+    assert pid in ids2

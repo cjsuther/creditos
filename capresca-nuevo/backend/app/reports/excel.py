@@ -21,6 +21,86 @@ def _encabezar(ws, columnas):
 ESTADO_TXT = {"A": "Activo", "C": "Cancelado"}
 
 
+def _num(ws, min_col, max_col, min_row=2):
+    for row in ws.iter_rows(min_col=min_col, max_col=max_col, min_row=min_row):
+        for cell in row:
+            cell.number_format = "#,##0.00"
+
+
+def _anchos(ws, anchos):
+    for idx, w in enumerate(anchos, start=1):
+        ws.column_dimensions[chr(64 + idx)].width = w
+
+
+def _guardar(wb) -> bytes:
+    buf = BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
+
+
+def sumas_y_saldos_excel(data: dict) -> bytes:
+    """Balance de comprobación: por cuenta con debe/haber y saldo deudor/acreedor + totales."""
+    wb = Workbook(); ws = wb.active; ws.title = "Sumas y saldos"
+    _encabezar(ws, ["Código", "Cuenta", "Rubro", "Debe", "Haber", "Saldo deudor", "Saldo acreedor"])
+    for f in data.get("filas", []):
+        ws.append([f["codigo"], f["nombre"], (f.get("tipo") or "").capitalize(),
+                   float(f["debe"]), float(f["haber"]), float(f["saldo_deudor"]), float(f["saldo_acreedor"])])
+    t = data.get("totales", {})
+    ws.append([])
+    ws.append(["", "", "TOTALES", float(t.get("debe", 0)), float(t.get("haber", 0)),
+               float(t.get("saldo_deudor", 0)), float(t.get("saldo_acreedor", 0))])
+    _num(ws, 4, 7)
+    _anchos(ws, [12, 36, 13, 15, 15, 15, 15])
+    return _guardar(wb)
+
+
+def estados_contables_excel(data: dict) -> bytes:
+    """Situación patrimonial + Estado de resultados en dos hojas."""
+    wb = Workbook()
+    sit = data.get("situacion", {}); res = data.get("resultados", {})
+    ws = wb.active; ws.title = "Situación patrimonial"
+    _encabezar(ws, ["Rubro", "Código", "Cuenta", "Importe"])
+    def _bloque(hoja, titulo, cuentas, total):
+        hoja.append([titulo, "", "", float(total)])
+        hoja[hoja.max_row][0].font = Font(bold=True)
+        for c in (cuentas or []):
+            hoja.append(["", c["codigo"], c["nombre"], float(c["valor"])])
+    _bloque(ws, "ACTIVO", sit.get("activo", {}).get("cuentas"), sit.get("activo", {}).get("total", 0))
+    ws.append([])
+    _bloque(ws, "PASIVO", sit.get("pasivo", {}).get("cuentas"), sit.get("pasivo", {}).get("total", 0))
+    pn = sit.get("patrimonio", {})
+    _bloque(ws, "PATRIMONIO NETO", (pn.get("cuentas") or []) + [{"codigo": "—", "nombre": "Resultado del ejercicio", "valor": pn.get("resultado_ejercicio", 0)}], pn.get("total", 0))
+    if sit.get("otros", {}).get("cuentas"):
+        ws.append([])
+        _bloque(ws, "OTRAS (a clasificar)", sit["otros"]["cuentas"], sit["otros"].get("total", 0))
+    ws.append([])
+    ws.append(["Activo", "", "", float(sit.get("total_activo", 0))])
+    ws.append(["Pasivo + PN", "", "", float(sit.get("total_pasivo_pn", 0))])
+    _num(ws, 4, 4); _anchos(ws, [22, 12, 34, 16])
+
+    wr = wb.create_sheet("Estado de resultados")
+    _encabezar(wr, ["Rubro", "Código", "Cuenta", "Importe"])
+    _bloque(wr, "INGRESOS", res.get("ingresos", {}).get("cuentas"), res.get("ingresos", {}).get("total", 0))
+    wr.append([])
+    _bloque(wr, "EGRESOS", res.get("egresos", {}).get("cuentas"), res.get("egresos", {}).get("total", 0))
+    wr.append([])
+    wr.append(["RESULTADO DEL EJERCICIO", "", "", float(res.get("resultado", 0))])
+    wr[wr.max_row][0].font = Font(bold=True)
+    _num(wr, 4, 4); _anchos(wr, [26, 12, 34, 16])
+    return _guardar(wb)
+
+
+def libro_diario_excel(asientos: list) -> bytes:
+    """Libro diario: una fila por línea de asiento (N°, fecha, diario, concepto, cuenta, debe, haber)."""
+    wb = Workbook(); ws = wb.active; ws.title = "Libro diario"
+    _encabezar(ws, ["N°", "Fecha", "Diario", "Concepto", "Cuenta", "Debe", "Haber", "Estado"])
+    for a in asientos:
+        for l in (a.lineas or []):
+            ws.append([a.numero or a.id, str(a.fecha), a.diario_codigo or "", a.concepto,
+                       f"{l.cuenta_codigo} · {l.cuenta_nombre}", float(l.debe), float(l.haber), a.estado])
+    _num(ws, 6, 7)
+    _anchos(ws, [7, 12, 10, 34, 34, 15, 15, 11])
+    return _guardar(wb)
+
+
 def listado_creditos_excel(items) -> bytes:
     """Listado de créditos: crédito, cliente, CUIL, línea, capital, saldo, estado."""
     wb = Workbook()

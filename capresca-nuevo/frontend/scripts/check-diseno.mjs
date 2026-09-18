@@ -62,10 +62,16 @@ const BLANCO_NEGRO = new Set(["#fff", "#ffffff", "#000", "#000000"]);
 const violTabla = [];
 const violColor = [];
 const violScope = [];
+const violDialogo = [];
+// Diálogos nativos del navegador prohibidos (usar confirmar/avisar/pedirTexto de ui/dialog).
+const DIALOGO_RE = /(?:\bwindow\.(?:confirm|alert|prompt)|(?<![.\w])(?:confirm|alert|prompt))\s*\(/;
 for (const file of objetivo) {
   const src = readFileSync(file, "utf8");
   const rel = "pages/" + relative(PAGES, file);
   const exento = /dise(ñ|n)o-ok/i.test(src);                 // aclaración explícita en el archivo → exime las reglas
+
+  // Regla 4 · nada de window.confirm/alert/prompt (van los diálogos in-app)
+  if (DIALOGO_RE.test(src)) violDialogo.push(rel);
 
   // Regla 1 · tabla única
   if (/<table[\s>]/.test(src) && !/\bDataTable\b/.test(src) && !exento && !allowTablas.has(rel)) {
@@ -132,5 +138,15 @@ if (violScope.length) {
   );
 }
 
+if (violDialogo.length) {
+  fallo = true;
+  console.error("\n✗ Principio de diseño «sin diálogos nativos» violado en:");
+  for (const v of violDialogo) console.error("   · " + v);
+  console.error(
+    "\n  No se usan window.confirm/alert/prompt (las cajitas 'localhost says…'). Usá los diálogos in-app\n" +
+    "  `confirmar`, `avisar` y `pedirTexto` de src/ui/dialog.tsx.\n"
+  );
+}
+
 if (fallo) process.exit(1);
-console.log(`✓ diseño: ${objetivo.length} página(s) revisada(s) — «tabla única», «color por tema» y «CSS scopeado» OK.`);
+console.log(`✓ diseño: ${objetivo.length} página(s) revisada(s) — «tabla única», «color por tema», «CSS scopeado» y «sin diálogos nativos» OK.`);

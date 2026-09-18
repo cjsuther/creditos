@@ -5,6 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
@@ -22,19 +23,27 @@ def _proximo_numero_resol(db: Session, anio: int, tipo: str) -> int:
 
 
 def crear_resolucion(db: Session, *, tipo: str, asunto: str, texto: str, organo: str,
-                     fecha: date | None = None, modelo_codigo: int | None = None,
-                     importe: Decimal | float = 0, origen: str = "",
+                     fecha: date | None = None, modelo_id: int | None = None,
+                     modelo_codigo: int | None = None, importe: Decimal | float = 0, origen: str = "",
                      beneficiarios: list[dict] | None = None) -> models.Resolucion:
     tipo = (tipo or "RES").upper()
     if tipo not in ("RES", "DIS"):
         raise ReglaNegocioError("Tipo inválido (RES o DIS)")
     f = fecha or date.today()
     # "Modelo a utilizar": su descripción es el MOTIVO y, si no vino texto, su plantilla es el cuerpo base.
+    # El id es único (el COD_MOD se repite entre tipos); si sólo vino el código, se resuelve por código.
     motivo_cod, motivo = 0, ""
-    if modelo_codigo:
+    m = None
+    if modelo_id:
+        m = db.get(models.ModeloResolucion, modelo_id)
+        if not m:
+            raise ReglaNegocioError("Modelo de resolución inexistente")
+    elif modelo_codigo:
         m = db.scalar(select(models.ModeloResolucion).where(models.ModeloResolucion.codigo == modelo_codigo))
         if not m:
             raise ReglaNegocioError("Modelo de resolución inexistente")
+    if m is not None:
+        modelo_codigo = m.codigo
         motivo_cod, motivo = m.codigo, m.descripcion
         if not (texto or "").strip():
             texto = m.plantilla or ""
@@ -58,6 +67,56 @@ def crear_resolucion(db: Session, *, tipo: str, asunto: str, texto: str, organo:
     r = crear_con_numero_unico(db, lambda: _proximo_numero_resol(db, f.year, tipo), _construir)  # árbitro DB (H-108)
     db.commit()
     db.refresh(r)
+    return r
+
+
+def editar_resolucion(db: Session, *, resol_id: int, fecha: date | None = None,
+                      modelo_id: int | None = None, modelo_codigo: int | None = None,
+                      texto: str | None = None, importe: Decimal | float | None = None,
+                      origen: str | None = None, beneficiarios: list[dict] | None = None) -> models.Resolucion:
+    """Edita un BORRADOR. Un instrumento OFICIAL (firmado / con Nº Real) o ANULADO es inmutable
+    (no se cambia un acto ya emitido). No cambia tipo/número/año (rompería la serie del correlativo)."""
+    import re
+    r = db.get(models.Resolucion, resol_id)
+    if not r:
+        raise ReglaNegocioError("Resolución inexistente")
+    if r.anulada:
+        raise ReglaNegocioError("La resolución está anulada; no se puede editar")
+    if r.estado == "F" or r.numero_real:
+        raise ReglaNegocioError("La resolución es oficial (firmada o con Nº Real); no se puede editar")
+    # "Modelo a utilizar": su descripción es el MOTIVO; si el texto queda vacío, su plantilla es el cuerpo.
+    if modelo_id or modelo_codigo:
+        m = (db.get(models.ModeloResolucion, modelo_id) if modelo_id
+             else db.scalar(select(models.ModeloResolucion).where(models.ModeloResolucion.codigo == modelo_codigo)))
+        if not m:
+            raise ReglaNegocioError("Modelo de resolución inexistente")
+        r.modelo_codigo = m.codigo
+        r.motivo_cod, r.motivo = m.codigo, (m.descripcion or "")[:120]
+        if texto is not None and not texto.strip():
+            texto = m.plantilla or ""
+    if fecha is not None:
+        if fecha.year != r.anio:
+            raise ReglaNegocioError("No se puede cambiar el año de la resolución")
+        r.fecha = fecha
+    if texto is not None:
+        r.texto = texto or ""
+    if importe is not None:
+        r.importe = Decimal(str(importe or 0))
+    if origen is not None:
+        r.origen = (origen or "")[:40]
+    # asunto derivado (mismo criterio que el alta): plano del texto, o tipo+año
+    plano = re.sub(r"<[^>]+>", " ", r.texto or "").strip()
+    r.asunto = (plano[:120].strip() or f"{r.tipo} {r.anio}")[:200]
+    if beneficiarios is not None:  # reemplaza la grilla completa
+        for b in list(r.beneficiarios):
+            db.delete(b)
+        db.flush()
+        for b in beneficiarios:
+            db.add(models.ResolucionBeneficiario(
+                resolucion_id=r.id, tipo_doc=int(b.get("tipo_doc") or 0),
+                nro_doc=str(b.get("nro_doc") or "")[:11], nombre=str(b.get("nombre") or "")[:80],
+                tipo_bene=int(b.get("tipo_bene") or 0)))
+    db.commit(); db.refresh(r)
     return r
 
 
@@ -170,6 +229,9 @@ def asignar_anexo(db: Session, *, tipo: int, numero: int, fecha: date,
 # ---------------- Expedientes y pases ----------------
 def crear_expediente(db: Session, *, numero: str, caratula: str, iniciador: str,
                      oficina_inicial: str, fecha: date | None = None) -> models.Expediente:
+    # El N° de expediente lo tipea la persona (viene del papel/mesa de entradas): NO se autogenera.
+    # Chequeo amistoso + la CONSTRAINT única como árbitro real (mismo criterio que el CUIL, H-154): dos
+    # altas concurrentes con el mismo número no crean duplicado; la 2ª cae en IntegrityError → 409 (no 500).
     if db.scalar(select(models.Expediente).where(models.Expediente.numero == numero)):
         raise ReglaNegocioError("Ya existe un expediente con ese número")
     f = fecha or date.today()
@@ -178,7 +240,11 @@ def crear_expediente(db: Session, *, numero: str, caratula: str, iniciador: str,
         fecha_inicio=f, estado="T", oficina_actual=oficina_inicial,
     )
     db.add(exp)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise ReglaNegocioError("Ya existe un expediente con ese número")
     # pase inicial (alta en la oficina iniciadora)
     db.add(models.Pase(expediente_id=exp.id, orden=1, fecha=f,
                        oficina_origen="", oficina_destino=oficina_inicial,

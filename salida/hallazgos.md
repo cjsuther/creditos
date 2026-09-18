@@ -7,6 +7,753 @@
 
 ---
 
+## H-200 · Auditoría del alta de crédito (pantalla por pantalla): 3 defectos
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Solicitudes · **Alcance:** pedido del usuario (registrar comportamiento + mejoras/bugs)
+- **Registro de comportamiento** del flujo de alta: (1) *Lista* — header + "＋ Nueva solicitud", filtros por
+  estado en pills, búsqueda, tabla DataTable (N°/cliente/monto/plazo/cuota est./estado con pill). (2)
+  *Asistente 3 pasos* — Solicitante (cliente del maestro con autocompletar, segmento, edad, antigüedad,
+  relación), Simulación (línea filtrada por canal del backoffice, monto, plazo, **simulación en vivo** con
+  debounce + mensaje de elegibilidad), Confirmación (resumen + destino + observaciones + Guardar borrador /
+  Crear y enviar). (3) *Panel de detalle* — acciones según estado (Enviar / Aprobar-Rechazar-Anular /
+  Originar), cronograma colapsable, diálogos in-app. (4) *Liquidación por lote* — lotes por día, Ver
+  contratos, Liquidar → desembolso con confirmación.
+- **Defecto 1 (BUG global — errores ilegibles)**: un 422 con `detail` estructurado (validación Pydantic) se
+  mostraba como **"[object Object]"** en el banner de error (p. ej. al enviar la solicitud). Causa:
+  `api.ts` hacía `new Error(detail.detail)` con un **array**. **Fix**: `mensajeDeError()` normaliza el array a
+  texto por campo ("edad: debe ser ≥ 18", "campo: es obligatorio", etc.). Aplica a **toda la app**.
+- **Defecto 2 (MEJORA — edad fuera de rango)**: el campo Edad aceptaba `< 18` (clamp cliente 0–99) aunque el
+  label y el backend exigen 18–99, llegando a un alta que el backend rechazaba. **Fix**: se bloquea
+  "Continuar" con **aviso inline** ("La edad debe estar entre 18 y 99") cuando la edad está fuera de rango.
+  **Verificado en vivo** (edad 5 → botón deshabilitado + aviso).
+- **Defecto 3 (BUG — TNA de la evaluación en tasa variable)**: `_evaluar` calculaba la cuota/TNA estimada con
+  `_tasa` (sólo `tasa_default` → **0** en productos de tasa VARIABLE), así una línea BADLAR mostraba la cuota
+  estimada **sin interés** y no coincidía con la simulación ni con la originación (que usan `_tna_base` =
+  índice+margen). **Fix**: `_evaluar` usa `_tna_base` — motor único / simulado==contratado.
+- Caso `auditoria-alta-credito`.
+
+---
+
+## H-199 · QA e2e de créditos (3+ hasta liquidar): dos defectos corregidos
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Solicitudes · **Alcance:** QA profundo pedido por el usuario (API + UI)
+- **Corrida técnica (API)**: 3 créditos desde solicitud → evaluación → aprobación → originación → liquidación
+  (LP-PERS-01 y LP-JUB-01 por **desembolso individual**, LP-VAR-01 por **lote**), + cobranza post-liquidación
+  en uno, + prueba negativa (backoffice **no** puede originar la línea WEB-only LP-NUEVA-08 → 422). **32/32
+  checks OK**. Contabilidad: los 4 asientos (3 otorgamiento + 1 pago) **balanceados** (debe=haber), doble
+  partida correcta (Préstamos otorgados / Caja), `empresa_id` consistente. Cronograma francés correcto
+  (capital+interés constante; la cuota 1 es más alta por el **cargo de otorgamiento** + IVA — no es bug).
+- **Corrida de usuario (UI)**: 1 crédito completo por pantalla (asistente Nueva solicitud → Crear y enviar →
+  Aprobar → Originar → Liquidar por lote → desembolsado, CTO-2026-00006 ACTIVO + asiento balanceado). La
+  simulación en vivo del asistente **valida elegibilidad** (bloqueó LP-JUB-01 para AGENTE_PUBLICO/edad 40) y
+  todos los diálogos son **in-app** (no nativos). Decimales "para mostrar" respetados (cuota a 2 decimales).
+- **Defecto 1 (refresco de estado)**: tras "Crear y enviar a evaluación", el panel de detalle quedaba en
+  **BORRADOR** con botón "Enviar a evaluación" pese a estar ya EN_EVALUACION (la lista sí era correcta).
+  Causa: `crear()` esperaba `r.solicitud` del `POST /solicitudes/{id}/estado`, que devuelve el serial directo.
+  **Fix**: `if (r?.id) s = r` (como `resolver()`). Se reabre el panel y muestra el estado correcto.
+- **Defecto 2 (oferta del backoffice sin filtro de canal)**: el asistente listaba la línea **"Prestamo Web"
+  (WEB-only)** porque pedía `ppOferta()` sin canal; originarla igual se rechazaba (elegibilidad), pero no
+  debía ofrecerse. **Fix**: `/contratos/segmentos` expone `canalBackoffice` y el asistente pide la oferta
+  filtrada por ese canal → aplica el filtro duro de canal (H-185) también en el alta del backoffice.
+- Caso `qa-e2e-solicitud-hallazgos`.
+
+---
+
+## H-198 · Créditos: decimales de CÁLCULO vs decimales para MOSTRAR
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Parámetros · **Alcance:** pedido del usuario ("para redondeo toma 4, pero para mostrar 2")
+- **Desdoble en dos parámetros**: el único `DECIMALES_CALCULO` se separa en (a) `DECIMALES_CALCULO`
+  (0–6, default 2) = precisión INTERNA con que el motor `cronograma` redondea cada cuota (ej. 4), y (b)
+  `DECIMALES_MOSTRAR` (0–6, default 2) = decimales con que se PRESENTAN los importes en pantalla (ej. 2).
+  `DECIMALES_MOSTRAR` **no** altera el cálculo, sólo la visualización. Ambos ámbito `creditos`.
+- **Backend**: helper `decimales_mostrar(db)` (refactor de `_decimales_param`); se seedean/backfillean ambos;
+  `/contratos/segmentos` ahora devuelve `decimalesCalculo` y `decimalesMostrar` para el front.
+- **Frontend**: "Parámetros de créditos" muestra los DOS campos ("para el cálculo (redondeo)" + "para
+  mostrar"). En "Solicitudes de crédito" el formateo de importes (`fmtMoney`) usa `decimalesMostrar` de
+  `/contratos/segmentos` (KPIs de simulación, resumen y cronograma).
+- **Orden de menú**: por pedido, "Parámetros de créditos" se movió del módulo Créditos al módulo **General**
+  (junto a "Parámetros generales"); la ruta `/creditos/parametros` no cambia.
+- **Verificado**: tests + candado + tsc (ver abajo). Caso `decimales-calculo-vs-mostrar`.
+
+---
+
+## H-197 · Créditos: parámetros por ámbito + decimales del cálculo
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Parámetros · **Alcance:** pedido del usuario (separar params + decimales)
+- **Separación por ámbito**: se agregó `Parametro.ambito` (`general` | `creditos` | `contabilidad`) con
+  migración + backfill. "Parámetros generales" ahora filtra a `general` (los de canales/decimales y
+  contables ya no se mezclan ahí). Endpoint `/admin/parametros?ambito=...`.
+- **Pantalla nueva "Parámetros de créditos"** (Créditos): catálogo de **canales** (chips editables, +
+  agregar, canal del portal, canal del backoffice) + **decimales del cálculo** (0–6).
+- **Decimales del cálculo (nuevo, exclusivo de créditos)**: parámetro `DECIMALES_CALCULO` (default 2). El
+  motor `cronograma` redondea cada cuota con esa precisión (`_r(x, dec)`); se pasa desde `_params_cronograma`
+  a través de `decimales_calculo(db)` en preview, portal, solicitud y **originación**. Los contratos ya
+  originados **conservan** su cronograma (snapshot); aplica a cálculos nuevos.
+- **Verificado**: en vivo la cuota pasó de $137456,83 (2 dec) a $137457 (0 dec) al cambiar el parámetro, y
+  volvió al restaurar. Tests `test_decimales_calculo_redondea_la_cuota` + `test_parametros_por_ambito`;
+  módulos productos/contratos/portal/solicitudes **114 passed**; candado 109 + tsc OK. Pantalla en vivo.
+  Caso `parametros-por-ambito`.
+
+---
+
+## H-196 · Créditos: se saca el Canal del alta de solicitud + validación de campos
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Solicitudes · **Alcance:** pedido del usuario
+- **Canal fuera del alta de solicitud**: el canal es una propiedad de la **configuración del producto**
+  (Disponibilidad), no una elección del operador al pedir la solicitud. Se quitó el selector; el alta de
+  backoffice queda con canal **SUCURSAL** por defecto (la elegibilidad de canal la resuelve la config).
+- **Validación de campos (buenas prácticas)**: edad **18–99** (2 dígitos) y antigüedad **0–1200 meses**
+  (hasta 4 dígitos), con **clamp en el input** (frontend) y en el modelo **Pydantic `SolicitudIn`** (backend,
+  `ge`/`le`) — la validación autoritativa vive en la API por donde pasan todas las escrituras. Monto y plazo
+  (1–240) también acotados. (Un CHECK a nivel DB queda como refuerzo opcional.)
+- **Verificado en vivo**: el paso 1 del wizard ya no muestra Canal; Edad (18–99) y Antigüedad (0–1200) con
+  sus límites. Candado 108 + tsc OK. Caso `solicitud-campos-validacion`.
+
+---
+
+## H-195 · Créditos: se unifica "Originar" en "Solicitudes" + flujo de pedido mejorado
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Solicitudes · **Alcance:** consolidación de UX (pedido del usuario)
+- **Observación del usuario (correcta):** "Originar Crédito (oferta)" y crear una "Solicitud" desde el
+  backoffice hacen lo mismo — la pantalla **Solicitudes de crédito** ya trae el mismo wizard (buscar cliente
+  del maestro → elegir línea de la oferta + simulación → confirmar) y además gestiona todo el ciclo. Nada
+  navegaba a `/creditos/originar` salvo el menú.
+- **Cambio:** se **retiró "Originar Crédito (oferta)"** del menú; `/creditos/originar` **redirige** a
+  `/creditos/solicitudes-credito` (por si quedan deep links). El componente OriginarCredito queda sin uso.
+- **Mejora del flujo de pedido:**
+  - **Simulación EN VIVO**: en el paso 2, al cambiar línea/monto/plazo se recalcula sola (debounce), sin el
+    botón "Simular".
+  - **"Crear y enviar a evaluación"**: en el paso 3, un botón crea la solicitud y la **manda al Inbox** en un
+    solo paso (además de "Guardar borrador").
+- **Verificado en vivo**: menú sin "Originar"; wizard con GOMEZ, MARIA LAURA → sim en vivo (Cuota $68.812,
+  TNA 41%, "✓ Elegible") → confirmación con los dos botones. Candado 108 + tsc OK. Caso `solicitud-unifica-originar`.
+
+---
+
+## H-194 · UX: Inbox como landing + cuadro de control con agrupaciones
+**Fecha:** 2026-09-17 · **Módulo:** UX / Navegación · **Alcance:** pedido del usuario
+- **Landing**: al ingresar (login) se va **directo al Inbox** (y el catch-all de rutas también).
+- **Renombre + ícono**: "Inbox de aprobaciones" → **"Inbox"**; ícono modernizado (bandeja SVG en un badge
+  redondeado, en la pantalla y en la barra superior).
+- **Cuadro de control**: la pantalla ya no es una lista plana. Muestra **agrupaciones** (Solicitudes de
+  crédito, Líneas de crédito, Desembolsos, Refinanciaciones, + "Otros") como tarjetas con su **cantidad**;
+  las vacías quedan atenuadas. Al entrar en una agrupación se ve la **lista** de lo pendiente de ese grupo
+  (aprobar/publicar/resolver, inline o con deep-link a la pantalla), con **"← Panel"** para volver.
+- **Campana de alertas**: se **quitó** del Topbar por redundante con el Inbox (el Inbox ya avisa lo
+  pendiente); queda solo el ícono de Inbox. Se le podrá dar otro uso más adelante (notificaciones del sistema).
+- **Íconos de las agrupaciones**: se reemplazaron los emojis por **íconos de línea SVG** (estilo del sistema)
+  en badges redondeados — Solicitudes (documento), Líneas de crédito (tarjeta), Desembolsos (billete),
+  Refinanciaciones (ciclo), Otros (paquete); los grupos vacíos quedan atenuados.
+- **Verificado en vivo**: login como admin → cae en el Inbox; el panel mostró Líneas de crédito con **1**
+  pendiente ("Ver 1 →") y el resto en 0; al entrar → ítem "Adelanto de Haberes LP-ADEL-01, EN_REVISION,
+  pedido por creditos"; el Topbar quedó solo con el ícono de Inbox. Candado 108 + tsc OK. Caso `inbox-cuadro-control`.
+
+---
+
+## H-193 · UX: vista restringida del menú lateral por rol
+**Fecha:** 2026-09-17 · **Módulo:** UX / Navegación · **Alcance:** pedido del usuario
+- **Regla de visibilidad del sidebar:** la vista **restringida** muestra sólo **Clientes** y **General**
+  completos + **todas las opciones `new`** (los demás módulos aparecen únicamente si tienen alguna opción
+  nueva, mostrando sólo ésas).
+- **Por rol:** es **siempre** así para usuarios **no-ADMG**; el **administrador (ADMG)** por defecto ve todo
+  y tiene el botón **"Ocultar módulos"** para alternar a la vista restringida (y "Mostrar todos los módulos"
+  para volver). El botón sólo aparece para ADMG (perfil del JWT).
+- Reemplaza el viejo esquema `oculto`/`soloNuevos` por una **regla uniforme** (`SIEMPRE_VISIBLE = {Clientes,
+  General}` + `i.nuevo`). La seguridad real la sigue dando el RBAC (`puedeVer`); esto es sólo la vista.
+- **Verificado en vivo:** admin (ADMG) → ve todo, "Ocultar" deja {Clientes, General, + módulos con `new`}
+  (se ocultan Caja/Juegos/Mesa/Seguros/Tesorería/Adm.Finanzas, sin `new`); usuario XCR (creditos) → vista
+  restringida SIEMPRE, sin botón. Candado 108 + tsc OK. Caso `sidebar-vista-restringida`.
+
+---
+
+## H-192 · UX: Inbox como ícono en la barra superior + limpieza de BADLAR
+**Fecha:** 2026-09-17 · **Módulo:** UX / Navegación · **Alcance:** pedido del usuario
+- El **Inbox de aprobaciones** pasó a ser un **ícono (bandeja)** en el Topbar, junto a la **campana** de
+  alertas, con el badge de tareas pendientes. Se quitó "Inbox de aprobaciones" del menú de Créditos.
+- **Limpieza de dato legacy (Opción A):** se descartó la versión BORRADOR (v2) remanente de "Crédito Tasa
+  Variable (BADLAR)" con el DELETE version-aware existente — borra sólo la versión, deja la v1 publicada; la
+  solicitud asociada referencia el producto (no la versión), así que no se toca. BADLAR quedó PUBLICADO v1.
+- **Verificado en vivo:** ícono Inbox + campana en el Topbar; Inbox fuera del menú de Créditos; BADLAR
+  PUBLICADO. Candado 108 + tsc OK. Caso `inbox-topbar`.
+
+---
+
+## H-191 · Configurar Créditos: vistas del catálogo (tarjetas / en línea) + saque del badge de versión
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Configurar · **Alcance:** UX del catálogo (pedido del usuario)
+- **Selector de vistas** en el catálogo: **▦ Tarjetas** (la de siempre) y **≣ En línea** (lista con el
+  componente `DataTable`: Línea+código, Estado con pill, Sistema, TNA, Monto, Plazo + menú de acciones ⋯).
+  La elección se persiste en `localStorage` (`cfgc_vista`). Base para sumar más vistas a futuro.
+- **Se quitó el badge "🌐 portal: vN"** de las tarjetas: era un remanente del versionado interno que
+  confundía. Con el modelo de préstamos independientes (H-190) ya no se generan versiones internas, así que
+  el badge dejaba de tener sentido.
+- **Verificado en vivo:** toggle Tarjetas/En línea funciona; la lista respeta el candado (tabla = DataTable,
+  pills, CSS scopeado `.cfgc-`); BADLAR ya no muestra "portal: v1". Candado 108 + tsc OK. Caso `catalogo-vistas`.
+
+---
+
+## H-190 · Configurar Créditos: duplicar en vez de versionar (préstamo independiente)
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Configurar · **Alcance:** simplificación de UX (pedida por el usuario)
+- **Problema:** crear una variante de un préstamo publicado era confuso — "Nueva versión" agregaba una v2 al
+  MISMO producto y hacía convivir "borrador v2" con "portal: v1", más el ciclo revisar→aprobar→publicar (~7 pasos).
+- **Modelo nuevo — préstamos independientes:** en vez de versionar, se **duplica**. **⧉ Duplicar** crea un
+  préstamo **NUEVO e independiente** (código propio, copia de la config vía `copiar_de`), que se edita y
+  publica por su cuenta. Guarda `PPProducto.copiado_de` (trazabilidad + prompt de retirar-original).
+- **Publicación en un paso:** `POST /api/productos/{id}/publicar-directo` encadena revisar→aprobar→publicar
+  cuando el cuatro-ojos (regla LINEA) está **inactivo**; si está **activo**, sólo manda a revisión y devuelve
+  `needs_approval=true` (otra persona aprueba — no se pierde la separación de funciones).
+- **UI:** en el catálogo y en el editor, "Nueva versión" → **⧉ Duplicar** (pide el nombre, prellenado
+  "… — copia"); en el borrador, botón único **Publicar** + **Descartar** (borra el borrador entero); al
+  publicar una copia de un publicado, se ofrece **retirar el original**. De ~7 pasos a **2** (Duplicar → Publicar).
+- **Verificado:** `test_duplicar_como_prestamo_independiente` (duplicar → publicar-directo en un paso →
+  retirar original; copiadoDe correcto). Productos+contratos+portal+lifecycle **107 passed**; candado 108 +
+  tsc OK. En vivo: Duplicar "Crédito Jubilados" → préstamo independiente LP-NUEVA-01 (borrador, código propio)
+  con banner y botones nuevos → Descartar → borrado; DB limpia (7 productos). Caso `duplicar-prestamo-independiente`.
+
+---
+
+## H-189 · Portal (bug + mejora): opt-in de canal y disponibilidad editable en publicado
+**Fecha:** 2026-09-17 · **Módulo:** Créditos / Portal · **Alcance:** QA del canal web
+- **Bug (detectado por el usuario):** el portal mostraba productos **sin canal configurado** (p. ej.
+  "Crédito Tasa Variable (BADLAR)", con la Disponibilidad **inactiva**). Causa: `_ofrecible_web` trataba
+  "componente AVAILABILITY inactivo" como "sin canales = todos" → se ofrecía por la web.
+- **Fix — OPT-IN público:** un producto aparece en el portal **sólo si la Disponibilidad está ACTIVA**
+  (con el canal del portal, o `canales` vacío = todos). Sin Disponibilidad configurada → **no** se lista
+  ni se puede solicitar (422). Evita exponer al público productos que nadie habilitó. Verificado en vivo:
+  el portal pasó de mostrar {BADLAR, Prestamo Web, Personal Flexible} a **{Prestamo Web, Personal
+  Flexible}** (los que tienen WEB); Jubilados (SUCURSAL/CONVENIO) sigue afuera.
+- **Mejora (pedida por el usuario):** la **Disponibilidad se puede editar aunque la línea esté PUBLICADA**,
+  sin crear versión nueva — canales/segmentos/reglas son metadata de **distribución**, no términos
+  financieros congelados (no alteran contratos ya originados ni el cronograma). Endpoint
+  `PUT /api/productos/{id}/disponibilidad` (upsert del componente AVAILABILITY sobre la versión vigente,
+  cualquier estado). En Configurar Créditos los chips de canal quedan editables en producto publicado, con
+  botón **"Guardar disponibilidad"**.
+- **Verificado:** `test_portal_no_muestra_sin_disponibilidad` (inactiva → no aparece; al activar WEB en la
+  publicada aparece). Portal+productos+contratos **99 passed**; candado 108 + tsc OK. Caso `portal-opt-in-canal`.
+
+---
+
+## H-188 · Contabilidad: libros separados por empresa (multi-plan)
+**Fecha:** 2026-09-17 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (múltiples planes por empresa)
+- **Modelo `Empresa`** (ente contable; una es predeterminada). Se agregó **`empresa_id`** a `cuentas_contables`,
+  `asientos`, `ejercicios_contables` y `extracto_bancario_lineas`. El **código de cuenta pasó a ser único
+  POR empresa** (antes único global): dos empresas pueden tener el mismo `1.1.01`.
+- **Migración segura:** create_all crea `empresas`; `_migrar_iam` siembra la empresa predeterminada,
+  agrega `empresa_id` (ALTER), **backfillea** todos los datos existentes a ella, baja la unique global de
+  `codigo` y sube la compuesta `(empresa_id, codigo)`. Eventos `before_insert` defaultean la empresa
+  predeterminada en cuentas/asientos → **el comportamiento mono-empresa queda idéntico** (todos los tests
+  contables previos siguen verdes sin cambios).
+- **Scope por empresa en TODO:** plan de cuentas (ABM + cargar-estándar/restaurar), sumas y saldos, estados
+  contables, flujo de efectivo, conciliación bancaria, análisis por centro, asientos manuales, ejercicios
+  (crear/cerrar/apertura, sin solape dentro de la empresa). Los generadores automáticos (otorgamiento/
+  cobranza/pp_*) y cierre/apertura estampan la empresa correcta.
+- **API:** `/contabilidad/empresas` (GET, POST, POST `/{id}/predeterminada`) + `empresa_id` en los reportes
+  y el plan. **Front:** selector de empresa en Plan de cuentas (persistido en localStorage) que se inyecta
+  como `empresa_id` en toda llamada `/contabilidad/*` (un solo punto en `api.req`).
+- **Verificado:** `test_libros_separados_por_empresa` (empresa B con su plan y un asiento que NO aparece en
+  los libros de A; código `1.1.01` conviviendo en ambas). Módulos contabilidad+contratos **65 passed** tras
+  el refactor; migración Postgres OK (empresa GRAL, 45/45 cuentas y 2/2 asientos backfilleados); selector
+  en vivo. Caso `multi-empresa-contable`.
+- **Simplificación consciente (fase futura):** diarios, centros de costo e imputaciones siguen siendo
+  GLOBALES (compartidos entre empresas); los contratos/servicing siguen posteando a la empresa
+  predeterminada. Asignar contratos a una empresa distinta de la principal es el próximo incremento.
+
+---
+
+## H-187 · Contabilidad: Conciliación bancaria
+**Fecha:** 2026-09-17 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (conciliación bancaria)
+- **Modelo `ExtractoBancarioLinea`** (líneas del resumen del banco; `importe` con signo: + ingreso / − egreso;
+  `conciliada` + FK opcional al movimiento del mayor). Tabla nueva (se crea sola con `create_all`).
+- **Cotejo** contra los movimientos del **mayor** (asientos publicados) en la cuenta banco. **Conciliar
+  manual**: seleccionar una línea del extracto → vincular un movimiento del **mismo importe con signo**
+  (valida cuenta, importe y que el movimiento no esté ya conciliado). **Conciliar automática**: empareja
+  pares del mismo importe sin conciliar, 1 a 1, prefiriendo fecha cercana. Se puede **desconciliar**.
+- **Estado**: saldo extracto vs saldo mayor + **diferencia** (0 = cuadra) y pendientes de cada lado.
+- **API** `/contabilidad/conciliacion` (GET estado; POST extracto/conciliar/desconciliar/automatica;
+  DELETE extracto). **UI** pantalla "Conciliación bancaria" (Contabilidad → Reportes): resumen + dos tablas
+  (extracto / mayor) con selección y vinculación, alta de líneas de extracto, automática.
+- **Verificado:** `test_conciliacion_bancaria` (depósito 50k + pago 20k: manual + automática + validación de
+  importe + desconciliar). Candado 108 páginas + tsc OK; página verificada en vivo sin errores. Caso
+  `conciliacion-bancaria`.
+
+---
+
+## H-186 · Contabilidad: Flujo de efectivo (cash flow, método directo)
+**Fecha:** 2026-09-17 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (flujo de efectivo)
+- **Flujo de efectivo por método directo** sobre las cuentas de efectivo (Caja/Banco, configurables en el
+  Parámetro **CUENTAS_EFECTIVO** = `1.1.01,1.1.02`): **saldo inicial** (mov. previos a "desde") +
+  **entradas** y **salidas** del período agrupadas por la cuenta de **contrapartida** (de dónde vino / a
+  dónde fue la plata) + **saldo final**. Sólo asientos publicados. `neto = Σentradas − Σsalidas =
+  saldo final − inicial`, y **cuadra** con el saldo de Caja de sumas y saldos.
+- **API** `GET /contabilidad/flujo-efectivo` (`svc.flujo_efectivo`); **UI** pestaña "Flujo de efectivo" en
+  Estados contables (saldo inicial, entradas/salidas por contrapartida, flujo neto, saldo final).
+- **Verificado:** `test_flujo_efectivo` (entrada 100k / salida 30k / neto 70k; con `desde` arrastra el
+  saldo inicial). En vivo con los asientos reales: entradas 366.424,59 − salidas 4.553.036,21 = −4.186.611,62,
+  igual al saldo acreedor de Caja. Caso `flujo-efectivo`.
+
+---
+
+## H-185 · Créditos: el canal deja de estar hardcodeado — catálogo y códigos configurables en Parámetros
+**Fecha:** 2026-09-16 · **Módulo:** Créditos / Portal · **Alcance:** parametrización + separación real de canal
+- **Motivación:** el código de canal ("WEB", "SUCURSAL") estaba **hardcodeado** en la API. Se llevó a
+  **Parámetros** (tabla `parametros`, editable en Controles → Parámetros generales), siguiendo el principio
+  de parametrización del proyecto. Tres parámetros sembrados y obligatorios (garantizados por seed):
+  - `CANALES` = `SUCURSAL,WEB,APP,CONVENIO` — catálogo de canales (reemplaza la lista hardcodeada).
+  - `CANAL_PORTAL` = `WEB` — qué canal habilita el **portal del ciudadano**.
+  - `CANAL_BACKOFFICE` = `SUCURSAL` — canal asumido al originar desde el backoffice sin canal explícito.
+- **La API los lee** (`canales_catalogo` / `canal_portal` / `canal_backoffice` en `productos.py`, con
+  fallback al default): `GET /contratos/segmentos` devuelve el catálogo configurable; el fix H-184 usa
+  `canal_backoffice(db)`; el portal usa `canal_portal(db)`.
+- **Separación real de catálogo por canal (antes NO existía):** `GET /portal/productos` ahora **lista solo
+  los productos habilitados en el canal del portal** — un producto sólo-SUCURSAL ya **no aparece** en la
+  web (antes se listaban todos los publicados). Guarda dura en `POST /portal/solicitudes`: aunque se conozca
+  el id, un producto no habilitado por el canal web da **422** ("no disponible por el canal web").
+- **Configurable de punta a punta:** cambiar `CANAL_PORTAL` a `SUCURSAL` invierte qué productos ofrece el
+  portal (cubierto por test).
+- **Verificado:** `test_canal_web_filtra_portal_y_es_configurable` (test_portal.py) + módulos portal/
+  productos/contratos **97 passed**. Parámetros visibles y editables en la pantalla Parámetros generales.
+  Caso `canal-parametrizado`.
+- **Refuerzos posteriores (misma tanda):**
+  - **Parámetros OBLIGATORIOS (estricto):** los readers (`canales_catalogo`/`canal_portal`/`canal_backoffice`)
+    fallan con error claro si el parámetro no existe, en vez de un default silencioso. Sembrados en el
+    lifespan (producción) y en el fixture de tests.
+  - **Oferta del backoffice filtra duro por canal:** `GET /contratos/oferta?canal=SUCURSAL` **no lista** un
+    producto solo-WEB (antes sólo lo marcaba no elegible). Test `test_oferta_backoffice_filtra_por_canal`.
+  - **UI:** el chip de canales/segmentos de Configurar Créditos ahora lee el catálogo configurable de
+    `GET /contratos/segmentos` (la lista fija quedó sólo como fallback).
+  - **Producto demo:** "Prestamo Web" (canal solo WEB) recreado y **publicado** de forma permanente.
+
+---
+
+## H-184 · Créditos (bug QA): un producto "solo WEB" se podía originar desde el backoffice con canal vacío
+**Fecha:** 2026-09-16 · **Módulo:** Créditos / Originación · **Alcance:** E2E canal web punta a punta
+- **Escenario probado (E2E):** producto **"Prestamo Web"** con Disponibilidad → **Canales = ["WEB"]** (solo
+  portal) → publicado → solicitud creada desde el **portal del ciudadano** (canal=WEB, origen=PORTAL) →
+  llega a la bandeja del backoffice → **control: no tomable desde backoffice** → originación legítima por
+  canal WEB → liquidación/desembolso → **asiento de otorgamiento** visible en Libro diario, balanceado.
+  Resultado del corrido por API: **21 OK / 0 FALLA / 1 BUG**.
+- **Control que SÍ funciona:** originar con `canal=SUCURSAL` → **422** ("Canal SUCURSAL no habilitado
+  (permitidos: WEB)"); en la oferta figura NO elegible y `solo_elegibles=true` lo excluye.
+- **BUG encontrado:** originar **sin canal** (campo vacío/omitido) **salteaba** el chequeo de disponibilidad
+  (`_elegibilidad`: `if disp["canales"] and can and ...` — con `can` vacío no evalúa el canal), de modo que
+  un producto solo-WEB **se podía originar desde el backoffice** como venta directa. `OriginarCredito.tsx`
+  manda `canal: cliente.canal || undefined`, así que un canal vacío llegaba al server sin piso.
+- **Fix (`contratos.py` `_originar_impl`):** canal efectivo = `data.canal or (canal de la solicitud web) or
+  "SUCURSAL"`. Así, originar sin canal desde el backoffice asume **SUCURSAL** (y un solo-WEB queda 422);
+  si la originación proviene de una **solicitud del portal**, hereda su canal (WEB) y se procesa OK.
+- **Verificado:** live post-fix — canal vacío → **422**, SUCURSAL → 422, WEB → 201. Regresión:
+  `test_web_only_no_se_origina_desde_backoffice` (test_contratos.py). Datos QA (producto, solicitud,
+  2 contratos, asiento de otorgamiento, actividad) **limpiados** de Postgres. Caso `originacion-canal`.
+- **Observaciones de diseño (no bug, mejora sugerida):** (1) el **portal lista TODOS los productos
+  publicados**, no filtra por canal WEB — hoy un producto solo-SUCURSAL igual aparecería en el portal;
+  (2) "solo web" no es un flag de primera clase sino el array `canales` de AVAILABILITY. Si se quiere
+  separación dura de catálogo por canal, conviene filtrar `GET /portal/productos` y `GET /contratos/oferta`
+  por canal, o agregar visibilidad explícita en `PPVersion`.
+
+---
+
+## H-183 · Contabilidad (bug QA): la reversa no preservaba el centro de costo
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** QA profundo de H-182
+- **Detectado en QA en vivo contra Postgres** (no en SQLite): al **reversar** un asiento manual, el
+  contra-asiento (`reversar_asiento`) copiaba cuenta y montos invertidos pero **omitía `centro_codigo`**.
+  Consecuencia: el asiento original impactaba su centro (p. ej. ADM) y su reversa caía en **"Sin centro"**,
+  dejando el análisis por centro **asimétrico** (cada centro no neteaba a cero, aunque el neto global sí).
+- **Fix:** `reversar_asiento` ahora copia `centro_codigo` por línea. La reversa cae en el mismo centro que
+  el original → el centro netea a cero (bruto duplicado, saldo 0) y nada cae en "Sin centro".
+- **Nota de diseño:** los asientos de **cierre (refundición)** y **apertura** siguen sin centro a propósito
+  (son resúmenes a nivel cuenta que agregan múltiples centros; no corresponde imputarlos a uno solo).
+- **Verificado:** QA en vivo contra Postgres **15/15 OK** (alta de centro, validación de centro inexistente
+  →422, borrador no impacta / publicado impacta el saldo neto, por-centro refleja, reversa netea el centro
+  y devuelve el saldo original; datos QA limpiados). Regresión cubierta en `test_centros_costo_analitica`
+  (la reversa deja COM con bruto duplicado y saldo 0, sin fila "Sin centro"). Suite backend completa verde.
+
+---
+
+## H-182 · Contabilidad: centros de costo + test E2E del flujo contable
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (paso 6) + QA
+- **Centros de costo** (dimensión analítica, tipo Odoo): ABM en **Contabilidad → Centros de costo**
+  (código/nombre/activo), sembrados **ADM / COM / FIN / SEG**. Cada **línea de asiento** puede llevar un
+  centro (columna **"Centro de costo"** en el editor, `— sin centro —` opcional); se valida contra centros
+  **activos**. Modelo `CentroCosto` + `AsientoLinea.centro_codigo`.
+- **Reporte "Por centro de costo"** en Estados contables: debe/haber/saldo por centro, con bucket
+  **"Sin centro"**. Servicio `analisis_por_centro`; endpoints `/contabilidad/centros-costo` (GET/POST/PUT)
+  y `/por-centro`.
+- **Test E2E** (`test_e2e_contable`): recorre el flujo completo de punta a punta — cargar **plan estándar**
+  → **parametrizar** (imputación evento→cuenta) → **asiento con centro** borrador→publicado → **estados
+  contables** balanceados → **ejercicio** abierto → **cierre** (refundición a 3.3) → **bloqueo** del período
+  → **export Excel**. Doble como plan de test; espejo del **manual con pantallas**.
+- **Verificado:** suite backend **377 passed** (2 nuevos: `test_centros_costo_analitica`,
+  `test_e2e_contable`); tsc + candado OK (107 páginas); UI verificada en vivo (columna Centro en el editor
+  de asientos, tab "Por centro de costo"). Caso `centros-costo`.
+
+---
+
+## H-181 · Contabilidad: export a Excel de los reportes
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (paso 5)
+- **Exportar a Excel** los reportes contables (openpyxl, `reports/excel.py`): **Sumas y saldos** (por cuenta
+  + totales), **Estados contables** (Situación patrimonial + Estado de resultados en **dos hojas**) y **Libro
+  diario** (una fila por línea de asiento). Endpoints `/contabilidad/{sumas-y-saldos,estados-contables,
+  libro-diario}/excel` (respetan el rango de fechas).
+- **UI:** botón **"⬇ Excel"** en la pantalla de Estados contables que exporta la vista actual.
+- **Verificado:** los 3 endpoints devuelven `.xlsx` válido (firma PK, content-type spreadsheetml); botón en
+  pantalla. Suite backend **375 passed**; tsc + candado OK. Test: `test_reportes_excel`.
+  Caso `reportes-contables-excel`.
+
+---
+
+## H-180 · Contabilidad: ejercicios contables (apertura / cierre / bloqueo de período)
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (paso 4)
+- **Ejercicios (períodos fiscales):** nueva pantalla Contabilidad → Archivos → **Ejercicios contables**.
+  Cada ejercicio es un rango de fechas con estado **abierto/cerrado**; no se permite **solapamiento**.
+- **Cierre:** genera el **asiento de cierre** — refundición de resultados: cancela las cuentas de ingreso y
+  egreso y lleva el neto a **"Resultado del ejercicio" (3.3)** del PN; guarda el resultado (ganancia/pérdida)
+  y **bloquea el período** (crear/editar/publicar asientos con fecha en el rango → 422).
+- **Reabrir:** elimina el asiento de cierre y libera el período.
+- **Apertura:** genera el **asiento de apertura** del ejercicio con los saldos **patrimoniales**
+  (activo/pasivo/PN) del período anterior (los resultados no se arrastran).
+- **Modelo:** `EjercicioContable` (nombre, desde, hasta, estado, resultado, asiento_cierre/apertura). Tabla
+  nueva (create_all). El bloqueo se aplica en `crear/editar/publicar` de asientos manuales.
+- **Verificado en vivo:** alta del "Ejercicio 2026" (Abierto) con acciones Generar apertura / Cerrar. Test
+  cubre cerrar (resultado + cuentas de resultado en cero), bloqueo (422 en período cerrado) y reabrir.
+  Contabilidad **15 passed** (suite completa corriendo). tsc + candado OK. QA data limpia.
+  Test: `test_ejercicio_cierre_y_bloqueo`. Caso `ejercicios-contables`.
+
+---
+
+## H-179 · Contabilidad: diarios + ciclo borrador → publicado en los asientos (estilo Odoo)
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (paso 3)
+- **Diarios (Odoo: journals):** cada asiento pertenece a un **diario** (Caja / Banco / Varios). Tabla
+  `diarios_contables` sembrada; selector en el alta y columna en la lista. Los automáticos
+  (otorgamiento/cobranza) van al diario **Caja**.
+- **Borrador → Publicado:** un asiento manual **nace en borrador** — editable y **no impacta el mayor**;
+  recién al **Publicarlo** afecta sumas y saldos / estados (los reportes excluyen borradores, como Odoo con
+  los *posted*). Un **publicado es inmutable** (no se edita ni borra: se corrige por **reversa**); un
+  **borrador** se edita o se elimina. Los automáticos nacen publicados.
+- **Modelo:** `Asiento` sumó `estado` (borrador|publicado) y `diario_codigo` (migración idempotente);
+  nueva tabla `diarios_contables`. `balances_por_cuenta` filtra `estado != 'borrador'`.
+- **UI:** pantalla "Asientos" con columnas Diario y Estado (Borrador/Publicado/Reversa/Reversado) y acciones
+  por estado — borrador: Editar / Publicar / Eliminar; publicado: Reversar; siempre Ver detalle.
+- **Verificado en vivo:** creado un borrador (diario Caja, balanceado) → publicado (con aviso in-app);
+  editar/eliminar/reversar según estado. Tests contabilidad **14 passed** (suite completa corriendo). tsc +
+  candado OK. QA data limpia. Tests: `test_borrador_no_impacta_mayor`, `test_asiento_manual_y_reversa`.
+  Caso `asientos-diario-borrador`.
+
+---
+
+## H-178 · Contabilidad: parametrización contable (asignar el asiento de cada operación)
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** pregunta del usuario ("cómo asignar un
+asiento contable a una operación")
+- **Problema:** los códigos de cuenta de los asientos automáticos estaban **hardcodeados** en el motor
+  (`_linea("1.2.01"…)`), así que "asignar un asiento a una operación" implicaba tocar código.
+- **Solución — Parametrización contable:** tabla `ImputacionContable` = mapa **evento → cuenta del plan**,
+  editable desde **Contabilidad → Parametrización contable**. Eventos: otorgamiento (créditos a cobrar /
+  caja-desembolso) y cobranza (capital / interés / punitorio / seguro / gastos / IVA). Se siembra con los
+  códigos actuales (comportamiento idéntico) y el motor lee la config vía `codigo_para(db, clave, default)`
+  en `asiento_otorgamiento` y `asiento_cobranza`.
+- **UI:** pantalla agrupada por operación; cada evento tiene un **selector de cuenta** (sólo imputables del
+  plan) que guarda al cambiar. Cambiar la cuenta de un evento **redirige el asiento** sin tocar código.
+- **Validación:** no se puede mapear a una cuenta de agrupación (no imputable) → 422.
+- **Verificado en vivo:** pantalla con Otorgamiento/Cobranza y sus cuentas; test reasigna el haber del
+  otorgamiento a Banco y el asiento nuevo imputa a 1.1.02. Tests contabilidad **13 passed** (full suite
+  corriendo). tsc + candado OK. Test: `test_imputacion_contable_dirige_el_asiento`. Caso
+  `parametrizacion-contable`.
+
+---
+
+## H-177 · Contabilidad: estados contables + sumas y saldos (desde los asientos)
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** roadmap contable (paso 2)
+- **Nueva pantalla** Contabilidad → Reportes → **Estados contables**, con 3 vistas y filtro por rango de
+  fechas, todo calculado desde los asientos (auto + manuales) agrupando por el **rubro** del plan:
+  - **Sumas y saldos** (balance de comprobación): por cuenta con movimiento — Σdebe, Σhaber y saldo
+    deudor/acreedor; totales que balancean (chip ✓).
+  - **Situación patrimonial**: **Activo = Pasivo + PN** (el PN suma el **Resultado del ejercicio**); chip
+    "✓ Balancea".
+  - **Estado de resultados**: **Ingresos − Egresos = Resultado** (ganancia/pérdida).
+- **Cuentas sin rubro (hallazgo real):** algunos asientos usan códigos **fuera del plan** (el componente
+  contable de Configurar Créditos imputa a 1.1.05.01, 2.1.07…, que no están en el plan estándar). El reporte
+  los agrupa en **"Otras cuentas (a clasificar)"** (del lado del activo) para que la ecuación cierre y se vea
+  qué falta clasificar. → **Resuelto:** se agregaron al plan estándar `1.1.05 Préstamos` / `1.1.05.01
+  Préstamos otorgados` (activo) y `2.1.07 IVA débito fiscal (Créditos)` (pasivo); tras recargar el estándar,
+  el reporte clasifica esas cuentas en su rubro y "Otras" queda **vacío** — la situación balancea limpia
+  ($366.424,59 = $366.424,59) sin bucket.
+- **Verificado en vivo:** con asientos de prueba, Situación **balancea** ($591.766,80 = $591.766,80),
+  Resultados muestra ingresos, y 'otras' surge con las cuentas pp. Suite backend (nuevo
+  `test_estados_contables`); tsc + candado OK. QA data limpia. Caso `estados-contables`.
+
+---
+
+## H-176 · Contabilidad: asientos manuales (doble partida + reversa) · fuera los diálogos nativos
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad / UX · **Alcance:** pedido del usuario
+- **Sin diálogos nativos (primero):** el usuario marcó que las cajitas grises del navegador
+  (`window.confirm/alert/prompt` — "localhost:5173 says…") **no van**; van los diálogos in-app
+  (`confirmar`/`avisar`/`pedirTexto` de `src/ui/dialog.tsx`). Plan de cuentas usaba `window.confirm` para
+  "descartar cambios" → se cambió por `confirmar({ danger:true })`. Se **sumó como Principio de diseño** y
+  con **candado nuevo** en `check-diseno.mjs` (falla si una página usa window.confirm/alert/prompt).
+- **Asientos manuales (contabilidad general):** nueva pantalla **Contabilidad → Asientos manuales**. Alta
+  por **doble partida** con grilla de líneas (cuenta del plan · debe · haber), **balance en vivo**
+  (Debe/Haber + pill "✓ Balanceado" / descuadre) y validaciones en backend: ≥2 líneas, cuentas existentes e
+  **imputables**, sin negativos, línea es debe **o** haber, y **Σdebe = Σhaber ≠ 0**. Correlativo por año y
+  auditoría (usuario).
+- **Reversa:** genera el **contra-asiento** (debe/haber invertidos), marca el original *reversado* y **no
+  borra** (event-sourcing / "la reversa contra-asienta, no elimina"). Los automáticos siguen en el Libro
+  diario; esta pantalla lista sólo manuales + reversas.
+- **Modelo:** `Asiento` sumó `numero, reversado, reversa_de, usuario` (migración idempotente en Postgres).
+- **Verificado en vivo:** alta balanceada (Caja 5.000 / Banco 5.000 → "✓ Balanceado" → N° 1 Normal) y
+  reversa (N° 2, con aviso in-app). Suite backend **370 passed**; tsc + candado OK. QA data limpia.
+  Test: `test_asiento_manual_y_reversa`. Casos `asientos-manuales`, `sin-dialogos-nativos`.
+
+---
+
+## H-175 · Contabilidad: cargar plan de cuentas estándar + baja de "Plan de cuentas 2"
+**Fecha:** 2026-09-16 · **Módulo:** Contabilidad · **Alcance:** pedido del usuario
+- **Cargar plan estándar:** botón **"＋ Cargar plan estándar"** que puebla el árbol con un chart contable
+  completo (Activo / Pasivo / Patrimonio neto / Ingresos / Egresos, con corrientes/no corrientes y
+  subcuentas típicas, ~40 cuentas). **Idempotente** (no pisa ni duplica), grupos no imputables y saldo
+  normal por rubro; incluye los códigos que usa el motor de asientos. Así la pantalla queda poblada como el
+  mock sin cargar rama por rama. (Servicio `cargar_plan_estandar` + endpoint `/plan-cuentas/cargar-estandar`.)
+- **Baja de "Plan de cuentas 2":** se eliminó la pantalla anterior (grilla-árbol simple) por redundante —
+  menú, ruta, import y archivo `PlanCuentas2.tsx`.
+- **Insumo (artículo de Fierro, soporte):** relevé funciones para sumar a Contabilidad más adelante —
+  **múltiples planes** por empresa (pestañas reales), **importar/exportar** el plan, **asientos manuales**
+  (recién ahí cobra sentido el flag *Manual* de la cuenta), **mayor por cuenta** por período y **saldos en
+  moneda alternativa**. Próximo sugerido: asientos manuales (partida doble).
+- **Verificado en vivo:** cargado el estándar en la DB (33 agregadas → árbol Activo/Pasivo/PN/Ingresos/
+  Egresos nombrado y coloreado por rubro). Suite backend **369 passed**; tsc + candado OK.
+  Test: `test_cargar_plan_estandar`. Caso `plan-cuentas-estandar`.
+
+---
+
+## H-174 · Contabilidad: Plan de cuentas moderno (master-detail) + "Plan de cuentas 2"
+**Fecha:** 2026-09-15 · **Módulo:** Contabilidad · **Alcance:** pedido del usuario (mock aprobado)
+- **Contexto:** se diseñó primero un **mock** (artifact) de la pantalla al estilo de sistemas contables
+  (árbol + "Datos de la cuenta"); con el OK del usuario se implementó en la app.
+- **Nueva "Plan de cuentas" (moderna)** — master-detail: **árbol jerárquico** plegable a la izquierda
+  (con puntos de color por rubro, buscador y barra de alta/subcuenta/borrado) + panel **"Datos de la
+  cuenta"** a la derecha: código, alias, nombre, descripción, **Rubro** (activo/pasivo/patrimonio/
+  ingreso/egreso, chip de color) y **Tipo** (Caja/Banco/Cliente…), **Moneda**, **Saldo normal**
+  (deudor/acreedor, *segmented*), toggles **Imputable** / **Carga manual**, y **Entidades relacionadas**
+  (tipo/entidad, agregar/quitar). Breadcrumb de la ruta, guardar/descartar, y creación de cuenta/subcuenta
+  con código sugerido.
+- **Modelo extendido:** `CuentaContable` sumó `descripcion, alias, moneda, clasificacion, saldo_normal,
+  imputable, manual, entidades (JSON)`. Migración idempotente en Postgres (ALTER … IF NOT EXISTS).
+- **"Plan de cuentas 2":** la versión anterior (grilla-árbol simple, H-173) se conservó y se renombró en el
+  menú a **Plan de cuentas 2** (ambas opciones con badge `new`).
+- **Verificado en vivo:** master-detail carga la cuenta al seleccionarla, edita y **persiste** (probado el
+  guardado de descripción → DB). Suite backend **368 passed**; tsc + candado OK (UI custom scopeada `.pcm-*`,
+  excepción de diseño declarada). Test: `test_plan_cuentas_datos_completos`. Caso `plan-cuentas-moderno`.
+- **Fidelidad al mock (ajuste posterior):** se alineó la pantalla al mock aprobado — pestañas
+  `Planes de cuentas` / `Predeterminado (1)`, barra **"Editar"** con **íconos SVG** (hermana / subcuenta /
+  eliminar / duplicar), **conectores** de árbol (líneas punteadas padre→hijo), **toggles** livianos (no
+  encajonados) y **paleta por rubro** (activo verde, pasivo ámbar, patrimonio índigo, resultados rosa) vía
+  tokens de tema `.pcm{--r-*}` en `styles.css` (sin hex en la página, candado OK). Las pestañas son visuales
+  por ahora (soporte real de múltiples planes = feature aparte). Nota: hubo que **reiniciar el dev server**
+  de Vite porque quedó sirviendo un módulo viejo (HMR trabado) que tiraba `ramas is not defined`.
+- **Grupos nombrables + "agregar" repensado (ajuste posterior 2):** (1) las ramas de agrupación (nodos del
+  árbol sin cuenta propia) ahora se pueden **nombrar** — al seleccionarlas se abre el panel en modo
+  "Nombrar rama" (código fijo, imputable off) y al guardar se crea la cuenta (ej. la raíz "1" → "ACTIVO").
+  (2) El alta se hace desde un **＋ que aparece al pasar el mouse** sobre cualquier fila (agregar subcuenta)
+  y la cuenta nueva se muestra como **fila fantasma** en el árbol mientras se completa, para ver dónde
+  queda; se guarda o se descarta. (3) Chevrons **planos** (›/˅ sin recuadro), raíces en **negrita
+  mayúscula**, Duplicar/Eliminar movidos al pie del panel (contextuales). Verificado en vivo (nombrar la
+  raíz "ACTIVO"; fantasma al agregar 1.2.01.01) y limpieza de datos QA.
+
+---
+
+## H-173 · Contabilidad: Plan de cuentas (ABM editable, plantilla base configurable)
+**Fecha:** 2026-09-15 · **Módulo:** Contabilidad · **Alcance:** pedido del usuario
+- **Nueva opción** Contabilidad → Archivos → **Plan de cuentas** (`new`). Se presenta como **árbol
+  jerárquico por código** (1 → 1.1 → 1.1.01), **indentado y plegable**: cada rama se expande/colapsa, con
+  Expandir/Colapsar todo. Las ramas intermedias que no existen como cuenta propia (p. ej. "1", "2.1") se
+  muestran como nodos **"grupo"** sintéticos. Alta/edición en modal; se puede agregar **subcuenta** desde
+  cualquier nodo (código del padre precargado). (Excepción de diseño declarada: `DataTable` es plana y no
+  modela la jerarquía; grilla-árbol custom scopeada `.plc-tree`.)
+- **Parte de la plantilla base** — las cuentas que usa el motor de asientos (Caja, Banco, Créditos a cobrar,
+  IVA débito fiscal, Intereses, Seguros, Gastos administrativos). Se pueden **crear** cuentas propias,
+  **renombrar** y **reclasificar** (activo/pasivo/patrimonio/ingreso/egreso).
+- **Protecciones:** código único (409 si repite); las cuentas **base** del sistema no se borran ni cambian
+  de código; una cuenta **con asientos** tampoco se borra (422). Botón **"Restaurar plantilla base"**
+  (idempotente) agrega las cuentas base que falten sin pisar ni duplicar.
+- **Coherencia con los asientos:** `_linea` ahora resuelve el nombre de la cuenta **desde el plan en la DB**
+  (con la base como fallback), así renombrar una cuenta se refleja en los asientos **nuevos**.
+- **Verificado:** ABM en vivo (lista base, modal flotante de alta) y suite. Tests:
+  `test_plan_cuentas_abm`, `test_plan_cuentas_refleja_nombre_en_asientos`. Caso `plan-cuentas-abm`.
+
+---
+
+## H-172 · Créditos: revisión para liquidar sin desbordes + cronograma desplegable
+**Fecha:** 2026-09-15 · **Módulo:** Créditos / UX · **Alcance:** pedido del usuario
+- **Síntoma:** en el detalle de la solicitud, el valor largo del **CBU** se salía de la pantalla y la
+  "Revisión para liquidar" se veía apretada.
+- **Fix:** cada ítem de la revisión se **apila** (etiqueta chica arriba, valor abajo) y los valores largos
+  hacen **wrap** dentro de su columna (`overflow-wrap:anywhere`), así el CBU (y cualquier dato) ya no
+  desborda. El grid del panel también protege sus valores contra desborde.
+- **Cronograma desplegable:** "Cronograma estimado" pasó a ser un **toggle plegable** (plegado por
+  defecto, con contador de cuotas) para no alargar el panel; se abre cuando el asesor lo necesita.
+- **Verificado en vivo:** CBU completo dentro de su columna; cronograma abre/cierra. Caso `revision-liquidar-ux`.
+
+---
+
+## H-171 · UX: el detalle de un registro debe ser FLOTANTE (no un panel inline)
+**Fecha:** 2026-09-15 · **Módulo:** UX / Diseño (varias pantallas) · **Alcance:** pedido del usuario
+- **Pedido:** "la pantalla cuando veo la solicitud debería ser flotante, eso revisalo en toda la aplicación".
+- **Solicitudes de crédito** ([SolicitudesCredito.tsx](capresca-nuevo/frontend/src/pages/creditos/SolicitudesCredito.tsx)):
+  el detalle dejó de ser un panel inline debajo de la tabla. Al clickear la fila abre **un único panel
+  flotante** (modal con scrim) que reúne todo — datos, cronograma, documentos, revisión para liquidar,
+  observación del asesor y las acciones (enviar/aprobar/rechazar/anular/originar + alta/vincular cliente).
+  Se eliminó el botón "Ver detalle" separado (el panel flotante YA es el detalle completo).
+- **Auditoría del resto de la app** (subagente, ~100 pantallas): la mayoría de las vistas de detalle ya
+  eran flotantes (drawer/modal con scrim: Clientes, Configurar Créditos, Resoluciones, Modelos,
+  Grupos/Perfiles/Usuarios, Auditoría de cambios…) o son reportes/dashboards/master-detail por diseño.
+  **Casos inline corregidos** además de Solicitudes:
+  - **Liquidación por lote** ([LiquidacionLote.tsx](capresca-nuevo/frontend/src/pages/creditos/LiquidacionLote.tsx)):
+    "Ver contratos" abría una card inline → ahora es **modal** (`.liq-*`).
+  - **Solicitudes (legacy)** ([Solicitudes.tsx](capresca-nuevo/frontend/src/pages/Solicitudes.tsx)):
+    el detalle + el plan de cuotas resultante eran cards inline → ahora **modal** único (`.sold-*`).
+- **Dejados como están (borderline, son drill-downs de reporte, no vistas de registro):** Balance/Mayor
+  (cuenta → su mayor) y Fondo de garantía (agencia → desglose por juego) — su despliegue inline debajo de la
+  tabla es el patrón esperado de un reporte; se documentan por si se quieren unificar más adelante.
+- **Verificado en vivo:** el detalle de Solicitudes abre flotante sobre un fondo atenuado y cierra limpio
+  (✕ / click afuera), sin empujar la página. tsc + candado de diseño OK (overlays scopeados por pantalla).
+
+---
+
+## H-170 · Solicitudes de crédito: revisión completa, alta de cliente al maestro, observación y Rechazar vs Anular
+**Fecha:** 2026-09-15 · **Módulo:** Créditos / Solicitudes · **Alcance:** pedido del usuario (captura del inbox)
+- **Rechazar vs Anular (aclarado + tooltips):** **Rechazar** = decisión crediticia **negativa** (se evaluó
+  y se deniega) — sólo desde `EN_EVALUACION`, requiere **rol aprobador** y **motivo**, deja `RECHAZADA`.
+  **Anular** = baja **administrativa** del trámite (error de carga, duplicada, el cliente desistió) —
+  desde cualquier estado salvo `ORIGINADA`, sólo permiso de **edición**, motivo opcional. Los botones ahora
+  llevan `title` con esa diferencia.
+- **"Ver detalle" (aprobar/originar con todo a la vista):** botón que abre un modal con la revisión
+  completa — datos de la solicitud, evaluación, **cronograma completo** (calculado con el mismo motor que la
+  simulación/originación, vía `/productos/{id}/simular-preview`), documentos del solicitante y la revisión
+  para liquidar. Desde el modal se Aprueba / Rechaza / Origina.
+- **Observación del asesor (opcional):** campo en el modal que queda registrado en
+  `datos_adicionales.obs_revision` (para **rechazar** funciona como el motivo). Al **originar**, la
+  observación viaja al contrato (`datos_adicionales.observaciones`).
+- **Alta de cliente = ir a Clientes → Maestro (decisión del usuario):** "Dar de alta en maestro" dejó de
+  usar un mini-form; ahora **navega** al Maestro con el alta **completa** precargada (apellido/nombre, DNI,
+  CUIL declarados) y un aviso; al **guardar**, vuelve a la solicitud y **vincula** el cliente recién creado
+  (round-trip por query params + auto-vinculación). Se agregó **"Vincular cliente"** (typeahead) para
+  enganchar uno que ya existe. Backend: `promover-cliente` acepta `cliente_id` (vincular existente) y el ID
+  del cliente se autogenera (CL-…, H-169).
+- **Verificado en vivo:** modal con cronograma y observación OK; navegación a Maestro con form completo
+  precargado + aviso de retorno OK; tooltips OK. Suite backend **365 passed**; tsc + candado OK.
+  Tests: `test_promover_vincular_cliente_existente`, `test_estado_guarda_observacion`. Caso `sol-revision-detalle`.
+
+---
+
+## H-169 · Clientes: el ID del maestro debe ser autogenerado (no el CUIL ni un N° de solicitud)
+**Fecha:** 2026-09-15 · **Módulo:** Clientes · **Alcance:** reporte del usuario (captura del maestro)
+- **Síntoma:** en el Maestro de clientes, la columna **ID** mostraba el **CUIT** en unas filas y un
+  **N° de solicitud** ("SOL-2026-00003") en otra. El usuario pidió que el ID sea **autogenerado**.
+- **Causa:** el `id_cliente` no tenía generación propia. Al **promover** una solicitud express al maestro
+  (`/solicitudes/{id}/promover-cliente`) se hacía `idc = data.id_cliente or (cuil or _numero(db))` → si no
+  había CUIL usaba el número **SOL-...** de la solicitud, y si había, el **CUIL**. El alta por ABM mandaba
+  `id_cliente:""`. Los clientes demo del seed tenían códigos CUIL-like hardcodeados.
+- **Fix:** el `id_cliente` se **autogenera del PK** (surrogate) con formato **`CL-000123`** (helper
+  `app/core/codigos.py`: `codigo_cliente(pk)` + `codigo_cliente_provisorio()` como placeholder único
+  pre-flush, dado que la columna es NOT NULL + unique). Se aplica en los dos caminos de alta
+  (`clientes.crear` y `solicitudes.promover_cliente`) y en el seed. **Un código explícito sólo se respeta
+  si viene de la migración/ETL** (CIDCLIENTE legacy numérico, que es un dato real del negocio y se usa en
+  los joins del ETL). Así el ID nunca es el CUIL ni un SOL-.
+- **Datos:** se normalizaron los 3 clientes demo existentes (CL-000001/2/5). No hay clientes migrados por
+  ETL en esta base (conservarían su CIDCLIENTE).
+- **Verificado:** suite backend; UI muestra CL-... en la columna ID. Tests:
+  `test_id_cliente_autogenerado`, `test_promover_cliente_express_al_maestro`. Caso `cliente-id-autogenerado`.
+- **Auditoría de toda la app (a pedido):** se revisó CADA columna string única (código/número) del modelo
+  y su asignación en el alta (`app/api/`, `app/services/`, `seed.py`; ETL excluido a propósito). **No hay
+  otro caso del bug**: el `id_cliente` era el único que copiaba un dato con significado (CUIL / N° de
+  solicitud). El resto de los códigos/números generados por el sistema ya pasa por el generador correcto
+  (`crear_con_numero_unico` + `_proximo_*` / `_codigo_libre`): `PPSolicitud.numero`,
+  `PPContrato.numero_contrato`, `PPProducto.codigo` (el clonar NO copia el código origen, genera uno
+  nuevo), y los `numero` correlativos de resoluciones, OP, recibos, pólizas, turnos. Los demás únicos son
+  identificadores **tipeados por humano / externos** (CUIL, código de impuesto/índice, código de
+  perfil/grupo, cuenta contable, clave de parámetro, username, ISO de moneda) — correctamente NO se
+  autogeneran.
+- **Endurecimiento derivado (unicidad concurrente):** `crear_expediente` usaba sólo check-then-insert; el
+  N° de expediente es tipeado por humano (correcto), pero dos altas concurrentes con el mismo número caían
+  en `IntegrityError` (500) en vez de un 409 limpio. Se agregó el catch → 409 con la CONSTRAINT como
+  árbitro (mismo criterio que el CUIL, H-154). `test_numero_expediente_unico` sigue verde.
+- **Nota (footgun latente, sin cambio):** `Perfil.codigo` tiene `default=""` en el modelo; hoy es inocuo
+  (el alta exige código no vacío y chequea duplicado), pero convendría quitar ese default para que un alta
+  sin código falle fuerte en vez de colisionar en `""`.
+
+---
+
+## H-168 · Despacho: editar un borrador de resolución/disposición
+**Fecha:** 2026-09-15 · **Módulo:** Despacho · **Alcance:** completitud de la ABM (mismo editor)
+- **Gap:** la pantalla de Resoluciones permitía **crear** y **ver**, pero no **editar** — ni siquiera un
+  borrador. Se completó el ABM con edición, usando el mismo editor mini-Word (`RichText`).
+- **Backend `PUT /api/despacho/resoluciones/{id}`** (`svc.editar_resolucion`): edita modelo (→ motivo),
+  texto (HTML), importe, exp./nota origen y **reemplaza** la grilla de beneficiarios. **No** cambia
+  tipo/número/año (rompería la serie del correlativo, única por tipo+año). Recalcula `asunto` del texto.
+- **Inmutabilidad del acto emitido:** un instrumento **oficial** (firmado o con Nº Real) o **anulado** no
+  se puede editar → el PUT devuelve **422**. Coherente con "no re-firmar" (H-164) y con los Principios
+  (event ya emitido no se altera; se corrige por otro acto).
+- **UI:** acción **"Editar"** (grilla y detalle) visible **sólo** en borradores (`estado≠F`, sin Nº Real,
+  no anulada). El modal reusa `EditorResolucion` en modo edición: tipo y N° correlativo de sólo lectura,
+  eyebrow "EDITAR BORRADOR · N° x/aaaa", botón "Guardar cambios". El modelo guardado (por código) se
+  resuelve al id único para preseleccionar el combo.
+- **Verificado en vivo:** creado un borrador (modelo "AYUDAS SOCIALES (SALUD)", plantilla cargada con
+  **negritas** preservadas), editado importe ($15.000) y origen (E20 77/2026) → el detalle refleja los
+  cambios y sigue Borrador; en resoluciones **oficiales** migradas el menú NO muestra "Editar". Modelo de
+  prueba borrado. Suite backend **362 passed**; tsc + candado OK.
+  Test: `test_resolucion_editar_borrador`. Caso `resolucion-editar-borrador`.
+
+---
+
+## H-167 · Despacho: ABM de Modelos de resoluciones (crear/editar con el editor mini-Word)
+**Fecha:** 2026-09-14 · **Módulo:** Despacho · **Alcance:** pedido del usuario
+- **Pedido:** "En la opción de modelos de resoluciones, se deben poder editar y crear nueva, y la idea es
+  usar el mismo editor que creaste."
+- **ABM completa:** la pantalla de Modelos dejó de ser sólo lectura. Layout de ABM estándar (header con
+  **＋ Nuevo modelo** → card con buscador → `DataTable` → modal de alta/edición). La acción por fila
+  **"Editar plantilla"** abre el mismo modal.
+- **Editor compartido:** se reutiliza el **mismo** editor mini-Word de las resoluciones extrayéndolo a un
+  componente `src/components/RichText.tsx` (barra Título/Subtítulo/párrafo, negrita/cursiva/subrayado,
+  lista, alineación; guarda HTML). Tanto Resoluciones como Modelos lo importan (se eliminó la copia local
+  y su CSS `.rt*` de Resoluciones).
+- **Backend:** `POST /api/despacho/modelos` (código autoasignado = `MAX(codigo)+1`, tipo_res 3 si DIS / 1
+  si RES) y `PUT /api/despacho/modelos/{id}` (descripción, tipo, seguros, plantilla). `tiene_plantilla` se
+  recalcula según haya cuerpo. La descripción es **obligatoria**: el schema `ModeloResolucionIn` ahora la
+  valida contra vacío-al-recortar (422), no sólo `min_length` del string crudo (`"   "` ya no pasaba a un
+  modelo con descripción vacía).
+- **Bug corregido — "no se ve lo que está guardado":** al abrir *Editar*, la plantilla guardada no
+  aparecía en el editor (mostraba el placeholder), aunque el backend la devolvía completa (p.ej. modelo
+  "1PRESTAMO JUBILADO": 3295 car. de HTML). Causa: `RichText` inicializaba su ref de control con
+  `useRef(value)`; como el editor se **monta recién después** de cargar la plantilla (gate "Cargando…"),
+  ya nacía con el HTML como `value` inicial → el guard `value !== last.current` era falso en el primer
+  render y nunca volcaba el `innerHTML` en el `contentEditable`. Fix: la ref arranca en un centinela
+  (`null`) para que el primer render **siempre** vuelque el contenido. (También afecta positivamente a
+  editar resoluciones existentes, que usan el mismo componente.) Verificado en vivo: el editor muestra las
+  3295 car. con **negritas** y párrafos **justificados** preservados.
+- **Verificado:** smoke-test en vivo (alta → id/código nuevo, `tiene_plantilla` true; edición 200 con
+  descripción/tipo/plantilla nuevos) y limpieza del modelo de prueba (vuelve a 338 reales). Modal renderiza
+  con el `RichText` y ahora **muestra la plantilla guardada**. tsc + candado de diseño OK.
+  Test: `test_modelo_abm_crear_editar`. Caso `modelos-resolucion-abm`. Menú marcado `new`.
+
+---
+
+## H-166 · Despacho: editor mini-Word, export a Word corregido, modelos por id
+**Fecha:** 2026-09-14 · **Módulo:** Despacho · **Alcance:** pedido del usuario
+- **Editor mini-Word:** el "Texto del instrumento legal" pasó de textarea a un editor rico
+  (`RichText`, contentEditable + barra: **Título/Subtítulo/párrafo**, negrita/cursiva/subrayado, lista,
+  alineación) que guarda **HTML**. Al elegir un modelo se carga su plantilla. El detalle muestra el HTML
+  renderizado.
+- **Formato preservado en la migración (mejora sobre H-165):** el RTF ya no se aplana a texto plano; se
+  agregó `rtf_a_html` (mismo tokenizer, ahora rastrea negrita/cursiva/subrayado y alineación por párrafo →
+  `<p>`, `<b>`, `<i>`, `<u>`, `text-align`). Se re-migró: los textos de resoluciones (41.300) y las
+  plantillas de modelos conservan **negritas, cursivas y párrafos centrados** (títulos). El export a Word
+  respeta la alineación (`text-align` → párrafo centrado/justificado).
+- **Export a Word corregido:** (1) nombre institucional **correcto** — "CAJA DE CRÉDITO Y PRESTACIONES
+  PROVINCIAL — Ca.Pre.S.Ca." (antes decía "Previsión Popular"); (2) **un solo título** limpio (tipo + N°,
+  usa el real si está) con el **motivo como subtítulo** — antes ponía un "ASUNTO:" con el texto recortado y
+  duplicaba encabezados; (3) **renderiza el HTML** del editor (h1-h3 → títulos centrados, b/i/u → runs,
+  ul/li → viñetas) vía un `HTMLParser`→docx; si el texto es plano (migrado) lo rinde por líneas.
+- **Modelos por id:** el `COD_MOD` legacy se repite entre tipos → la lista de Modelos y el combo "Modelo a
+  utilizar" ahora usan el **id único** (rowKey/option/value), y crear-resolución + cargar-plantilla se
+  resuelven por id (sin ambigüedad). El endpoint `/modelos` devuelve `id`; `/modelos/{id}` es por PK.
+  (La pantalla de Modelos ya mostraba los 338 tras la migración de H-164; lo que faltaba era el id.)
+- **Verificado:** editor en vivo (escribir + "Título" centra y agranda); export Word inspeccionado (nombre
+  correcto, sin nombre viejo, HTML rendido); modelo por id + alta con modelo_id OK. tsc + candado OK.
+  Tests: `test_resolucion_word_nombre_y_html` (+ los de H-164). Caso `resolucion-editor-word`.
+
+---
+
 ## H-165 · Bug del lector DBF: los campos memo (.fpt) migraban vacíos (RTF)
 **Fecha:** 2026-09-14 · **Módulo:** ETL / Migradores · **Alcance:** bug encontrado al migrar Despacho
 - **Síntoma:** las resoluciones migraban **sin texto** ("no hay texto"), pese a que el `.FPT` (memos) existe

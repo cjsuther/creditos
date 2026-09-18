@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import DataTable, { Col } from "../components/DataTable";
 import LimpiarFiltros from "../components/LimpiarFiltros";
@@ -45,6 +45,9 @@ export default function Clientes() {
   const [esAlta, setEsAlta] = useState(false);
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
+  const [params, setParams] = useSearchParams();
+  // Si venimos desde una solicitud express (Solicitudes → "Dar de alta en maestro"): al guardar volvemos a vincular.
+  const [desdeSolicitud, setDesdeSolicitud] = useState<string>("");
 
   async function cargar(off = 0, s = sort, o = order) {
     setOffset(off);
@@ -77,7 +80,17 @@ export default function Clientes() {
     { label: "Reactivar", icon: "rotate-ccw", onClick: () => reactivar(c), hidden: !c.baja },
   ];
 
-  function abrirAlta() { setForm({ ...VACIO }); setEsAlta(true); setError(""); }
+  function abrirAlta(prefill: Partial<typeof VACIO> = {}) { setForm({ ...VACIO, ...prefill }); setEsAlta(true); setError(""); }
+  // Deep-link desde Solicitudes: abre el alta COMPLETA con los datos declarados precargados.
+  useEffect(() => {
+    if (params.get("alta") !== "1") return;
+    abrirAlta({
+      apellido_nombre: params.get("nombre") || "", dni: (params.get("dni") || "").replace(/\D/g, "").slice(0, 9),
+      cuil: (params.get("cuil") || "").replace(/\D/g, "").slice(0, 11),
+    });
+    setDesdeSolicitud(params.get("sid") || "");
+    setParams({}, { replace: true });   // limpia la URL; conservamos el sid en estado
+  }, [params]);   // eslint-disable-line
   function abrirEdicion(c: any) {
     setForm({
       ...VACIO, ...c,
@@ -119,11 +132,18 @@ export default function Clientes() {
     };
     try {
       if (esAlta) {
-        await api.crearCliente({ ...payload, cuil: form.cuil.replace(/\D/g, ""), id_cliente: form.id_cliente });
+        const creado = await api.crearCliente({ ...payload, cuil: form.cuil.replace(/\D/g, ""), id_cliente: form.id_cliente });
+        setForm(null);
+        if (desdeSolicitud) {   // volver a la solicitud y vincular el cliente recién creado
+          const sid = desdeSolicitud; setDesdeSolicitud("");
+          nav(`/creditos/solicitudes-credito?vincular=${encodeURIComponent(sid)}&cliente=${creado.id}`);
+          return;
+        }
       } else {
         await api.editarCliente(form.id, payload);
+        setForm(null);
       }
-      setForm(null); cargar(offset);
+      cargar(offset);
     } catch (e: any) { setError(e.message); }
     finally { setGuardando(false); }
   }
@@ -148,7 +168,7 @@ export default function Clientes() {
           <p className="muted" style={{ margin: 0 }}>{num(data.total)} agentes · alta, baja y modificación</p>
         </div>
         <div style={{ flex: 1 }} />
-        <button onClick={abrirAlta}>＋ Nuevo cliente</button>
+        <button onClick={() => abrirAlta()}>＋ Nuevo cliente</button>
       </div>
 
       <div className="card" style={{ padding: 0 }}>
@@ -189,6 +209,7 @@ export default function Clientes() {
               <button className="x" onClick={() => setForm(null)}>✕</button>
             </div>
             <div className="dbody">
+              {esAlta && desdeSolicitud && <p className="hint" style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>Alta desde una solicitud express. Al guardar, volvés a la solicitud y el cliente queda vinculado.</p>}
               {error && <p className="error">{error}</p>}
               <div className="sect">
                 <div className="lg">Identidad</div>

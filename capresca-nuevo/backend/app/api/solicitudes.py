@@ -14,14 +14,15 @@ from sqlalchemy.orm import Session
 
 from app.services import documentos
 
+from app.core.codigos import codigo_cliente, codigo_cliente_provisorio
 from app.core.database import get_db
 from app.core.numbering import crear_con_numero_unico
 from app.core.idempotency import con_idempotencia
 from app.deps import get_current_user
 from app import models, models_productos as m
 from app.api.productos import (_version_efectiva, _disponibilidad, _elegibilidad,
-                               _tasa, _calc_codigo_por_version, _params_cronograma,
-                               _cargo, _feriados_engine)
+                               _tna_base, _calc_codigo_por_version, _params_cronograma,
+                               _cargo, _feriados_engine, decimales_calculo)
 from app.core.permisos import caps_creditos
 from app.api.contratos import _ctx
 from app.services.productos_calc import cronograma, resumen
@@ -56,8 +57,8 @@ class SolicitudIn(BaseModel):
     cliente_datos: dict = {}                       # si NO_REGISTRADO: {cuil, apellido_nombre, dni, nacimiento}
     segmento: str = ""
     canal: str = "SUCURSAL"
-    edad: int | None = None
-    antiguedad_meses: int | None = None
+    edad: int | None = Field(default=None, ge=18, le=99)              # 2 dígitos; validación reflejada en el modelo
+    antiguedad_meses: int | None = Field(default=None, ge=0, le=1200)  # hasta 4 dígitos (0–1200 meses = 100 años)
     relacion: str = "ESTANDAR"
     datos_adicionales: dict = {}
     origen: str = "SUCURSAL"
@@ -66,6 +67,7 @@ class SolicitudIn(BaseModel):
 class AccionIn(BaseModel):
     accion: str            # enviar | aprobar | rechazar | anular
     motivo: str = ""
+    observacion: str = ""  # nota del asesor al resolver (queda en datos_adicionales.obs_revision)
 
 
 def _cliente_nombre(db: Session, s: m.PPSolicitud) -> str:
@@ -90,13 +92,16 @@ def _evaluar(db: Session, s: m.PPSolicitud) -> dict:
     elig = _elegibilidad(_disponibilidad(v), _ctx(s.segmento or None, s.canal or None, s.edad, s.antiguedad_meses))
     if not elig.get("elegible", True):
         motivos += elig.get("motivos", [])
-    tna = _tasa(v, "TNA")
+    # TNA base efectiva: fija = tasa_default; VARIABLE = índice + margen (H-200). Antes usaba `_tasa` (sólo
+    # tasa_default → 0 en productos de tasa variable), así la cuota estimada de la solicitud ignoraba el
+    # interés y no coincidía con la simulación ni con la originación (que usan `_tna_base`). Motor único.
+    tna = _tna_base(db, v)
     cuota_est = tna_ef = 0.0
     if not motivos:
         calc_map = _calc_codigo_por_version(db)
         sistema = calc_map.get(v.calculador_version_id, "FRANCES")
         filas = cronograma(sistema, monto, plazo, tna, _cargo(v, "OTORGAMIENTO"), date.today(),
-                           **_params_cronograma(v, _feriados_engine(db)))
+                           **_params_cronograma(v, _feriados_engine(db), decimales_calculo(db)))
         res = resumen(filas, monto, v.frecuencia_pago or "MENSUAL", tna)
         cuota_est, tna_ef = res["primeraCuota"], res["tna"]
     return {"elegible": not motivos, "motivos": motivos,
@@ -251,6 +256,8 @@ def cambiar_estado(sid: str, data: AccionIn, db: Session = Depends(get_db),
     if not s:
         raise HTTPException(404, "Solicitud no encontrada.")
     acc = data.accion.lower()
+    if data.observacion.strip():   # nota del asesor al resolver (aprobar/rechazar/anular/originar)
+        s.datos_adicionales = {**(s.datos_adicionales or {}), "obs_revision": data.observacion.strip()[:500]}
     from app.services import workflow as wf
     if acc == "enviar":
         _req_edita(db, user)
@@ -296,6 +303,7 @@ def cambiar_estado(sid: str, data: AccionIn, db: Session = Depends(get_db),
 
 
 class PromoverIn(BaseModel):
+    cliente_id: int = 0           # vincular un cliente YA existente del maestro (alta hecha en Clientes → Maestro)
     id_cliente: str = ""          # código a asignar en el maestro (opcional; si vacío se genera)
     # Datos completados/confirmados por el asesor en la revisión del alta (H-137). Vacío = usar lo declarado.
     cuil: str = ""                # una web/express llega sin CUIL: el asesor lo completa acá
@@ -314,6 +322,14 @@ def promover_cliente(sid: str, data: PromoverIn, db: Session = Depends(get_db),
         raise HTTPException(404, "Solicitud no encontrada.")
     if s.solicitante_tipo != "NO_REGISTRADO":
         raise HTTPException(409, "La solicitud ya es de un cliente registrado.")
+    # Vincular un cliente YA existente (lo dieron de alta en Clientes → Maestro y vuelven a vincular).
+    if data.cliente_id:
+        cli = db.get(models.Cliente, data.cliente_id)
+        if not cli:
+            raise HTTPException(404, "Cliente del maestro no encontrado.")
+        s.solicitante_tipo = "REGISTRADO"; s.cliente_id = cli.id; s.cliente_datos = {}
+        db.commit(); db.refresh(s)
+        return {"solicitud": _serial(db, s), "clienteId": cli.id, "yaExistia": True}
     cd = s.cliente_datos or {}
     nombre = (data.apellido_nombre or cd.get("apellido_nombre") or "").strip()
     if not nombre:
@@ -326,9 +342,13 @@ def promover_cliente(sid: str, data: PromoverIn, db: Session = Depends(get_db),
     if existente:
         cli = existente
     else:
-        idc = data.id_cliente or (cuil or _numero(db))
-        cli = models.Cliente(id_cliente=idc, cuil=cuil, dni=dni, apellido_nombre=nombre)
+        # H-169: el id_cliente del maestro se AUTOGENERA del PK (no el CUIL ni el N° de solicitud).
+        manual = (data.id_cliente or "").strip()
+        cli = models.Cliente(id_cliente=manual or codigo_cliente_provisorio(),
+                             cuil=cuil, dni=dni, apellido_nombre=nombre)
         db.add(cli); db.flush()
+        if not manual:
+            cli.id_cliente = codigo_cliente(cli.id); db.flush()
     s.solicitante_tipo = "REGISTRADO"; s.cliente_id = cli.id; s.cliente_datos = {}
     db.commit(); db.refresh(s)
     return {"solicitud": _serial(db, s), "clienteId": cli.id, "yaExistia": bool(existente)}

@@ -49,6 +49,9 @@ def fresh_db(request):
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         seed(db)
+        # Parámetros de canal (H-185): obligatorios en la API, se siembran también en tests.
+        from app.api.productos import seed_canales_parametros
+        seed_canales_parametros(db)
     yield
     Base.metadata.drop_all(bind=engine)
 

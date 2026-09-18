@@ -11,8 +11,9 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 
-def _r(x: float) -> Decimal:
-    return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+def _r(x: float, dec: int = 2) -> Decimal:
+    dec = max(0, min(6, int(dec)))
+    return Decimal(str(x)).quantize(Decimal(1).scaleb(-dec), rounding=ROUND_HALF_UP)
 
 
 # Feriados nacionales argentinos de fecha FIJA (inamovibles). Los trasladables/movibles
@@ -65,7 +66,7 @@ def cronograma(sistema: str, monto: float, plazo: int, tna: float,
                dia_pago: int = 5, primer_venc_dias: int = 30,
                ajuste_fin_semana: str = "SIN_AJUSTE", tipo_cuota: str = "VENCIDA",
                financiable: bool = False, cargo_momento: str = "PRORRATEADO",
-               feriados: set[date] | None = None) -> list[dict]:
+               feriados: set[date] | None = None, decimales: int = 2) -> list[dict]:
     fecha_valor = fecha_valor or date.today()
     cargos = cargos or []
     impuestos = impuestos or []
@@ -156,10 +157,10 @@ def cronograma(sistema: str, monto: float, plazo: int, tna: float,
             "fecha_vencimiento": _venc(fecha_valor, k, per, int(dia_pago or 5),
                                        int(primer_venc_dias if primer_venc_dias is not None else 30),
                                        str(ajuste_fin_semana or "SIN_AJUSTE"), feriados),
-            "saldo_inicial": _r(bal), "capital": _r(capital), "interes": _r(interes),
-            "cargos": _r(cargos_cuota), "impuestos": _r(imp),
-            "total": _r(capital + interes + cargos_cuota),
-            "saldo_final": _r(closing),
+            "saldo_inicial": _r(bal, decimales), "capital": _r(capital, decimales), "interes": _r(interes, decimales),
+            "cargos": _r(cargos_cuota, decimales), "impuestos": _r(imp, decimales),
+            "total": _r(capital + interes + cargos_cuota, decimales),
+            "saldo_final": _r(closing, decimales),
         })
         bal = closing
     return filas

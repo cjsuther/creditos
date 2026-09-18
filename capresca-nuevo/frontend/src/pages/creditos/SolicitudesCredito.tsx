@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { useNivelActual } from "../../permisos";
-import { confirmar, avisar, pedirTexto } from "../../ui/dialog";
+import { confirmar, avisar } from "../../ui/dialog";
 
-const money = (n: number) => "$" + (n || 0).toLocaleString("es-AR", { maximumFractionDigits: 0 });
+// Formatea importes con la cantidad de decimales "para mostrar" configurada en Parámetros de créditos (H-198).
+const fmtMoney = (n: number, dec: number) =>
+  "$" + (n || 0).toLocaleString("es-AR", { minimumFractionDigits: dec, maximumFractionDigits: dec });
 const ESTADO_CLASS: Record<string, string> = {
   BORRADOR: "", EN_EVALUACION: "warn", APROBADA: "ok", RECHAZADA: "crit", ORIGINADA: "brand", ANULADA: "",
 };
@@ -15,6 +18,12 @@ const DESTINO: Record<string, string> = {
   EMPRENDIMIENTO: "Emprendimiento / negocio", OTRO: "Otro",
 };
 const kb = (n: number) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
+// Deja sólo dígitos y acota a [min, max]; string vacío = sin valor (campo opcional). Mismos límites que el backend.
+const clampNum = (v: string, min: number, max: number): string => {
+  const d = String(v).replace(/\D/g, "");
+  if (d === "") return "";
+  return String(Math.max(min, Math.min(max, parseInt(d, 10))));
+};
 
 export default function SolicitudesCredito() {
   const [items, setItems] = useState<any[]>([]);
@@ -27,9 +36,20 @@ export default function SolicitudesCredito() {
   const [paso, setPaso] = useState(1);          // wizard: 1 Solicitante · 2 Simulación · 3 Confirmación
   const [sim, setSim] = useState<any>(null);
   const [simulando, setSimulando] = useState(false);
-  const [altaSol, setAltaSol] = useState<any>(null);   // solicitud en alta al maestro (modal de revisión)
-  const [alta, setAlta] = useState({ apellido_nombre: "", dni: "", cuil: "" });
-  const [altaErr, setAltaErr] = useState("");
+  const nav = useNavigate();
+  const [params, setParams] = useSearchParams();
+  // Detalle flotante de la solicitud (datos + cronograma + docs + revisión) con observación y acciones.
+  const [crono, setCrono] = useState<any[]>([]);
+  const [cargandoCrono, setCargandoCrono] = useState(false);
+  const [cronoAbierto, setCronoAbierto] = useState(false);   // el cronograma arranca plegado (desplegable)
+  const [obs, setObs] = useState("");
+  const [detErr, setDetErr] = useState("");
+  const [accionando, setAccionando] = useState(false);
+  // Vincular un cliente ya existente del maestro a una solicitud express (typeahead).
+  const [vincSol, setVincSol] = useState<any>(null);
+  const [vincQ, setVincQ] = useState("");
+  const [vincList, setVincList] = useState<any[]>([]);
+  const [vincErr, setVincErr] = useState("");
   // Cliente de la solicitud: se ELIGE del maestro con un buscador (igual que Originar); no se carga a mano.
   const [cliQ, setCliQ] = useState("");
   const [clis, setClis] = useState<any[]>([]);
@@ -39,7 +59,8 @@ export default function SolicitudesCredito() {
   const [docs, setDocs] = useState<any[]>([]);
   const [err, setErr] = useState("");
   const [lineas, setLineas] = useState<any[]>([]);
-  const [cat, setCat] = useState<{ segmentos: string[]; canales: string[] }>({ segmentos: [], canales: [] });
+  const [cat, setCat] = useState<{ segmentos: string[]; canales: string[]; decimalesMostrar?: number; canalBackoffice?: string }>({ segmentos: [], canales: [] });
+  const money = (n: number) => fmtMoney(n, Math.max(0, Math.min(6, cat.decimalesMostrar ?? 2)));
 
   const [form, setForm] = useState<any>({
     solicitante_tipo: "REGISTRADO", cliente_id: 0,
@@ -53,15 +74,50 @@ export default function SolicitudesCredito() {
     setItems(d.items); setEstados(d.estados); setPermisos(d.permisos);
   }).catch((e) => setErr(String(e)));
   useEffect(() => { cargar(); }, [filtro, q]);
-  // Documentación que adjuntó el solicitante (la sube el ciudadano desde el portal).
+  // Al seleccionar una solicitud (panel flotante): documentación adjunta + cronograma + observación previa.
   useEffect(() => {
-    if (sel?.id) api.ppSolicitudDocs(sel.id).then((d: any) => setDocs(d.items)).catch(() => setDocs([]));
-    else setDocs([]);
-  }, [sel?.id]);
+    if (!sel?.id) { setDocs([]); setCrono([]); return; }
+    setObs((sel.datosAdicionales?.obs_revision as string) || ""); setDetErr(""); setCronoAbierto(false);
+    api.ppSolicitudDocs(sel.id).then((d: any) => setDocs(d.items)).catch(() => setDocs([]));
+    if (!sel.productoId) { setCrono([]); return; }
+    setCargandoCrono(true);
+    api.ppSimPreview(sel.productoId, {
+      monto: sel.monto, plazo: sel.plazo, segmento: sel.segmento || undefined, canal: sel.canal || undefined,
+      edad: sel.edad ?? undefined, antiguedad_meses: sel.antiguedadMeses ?? undefined,
+    }).then((sim: any) => setCrono(sim.cuotas || [])).catch(() => setCrono([])).finally(() => setCargandoCrono(false));
+  }, [sel?.id]);   // eslint-disable-line
   useEffect(() => {
-    api.ppOferta().then((d) => { setLineas(d.items); if (d.items[0]) setForm((f: any) => ({ ...f, producto_id: f.producto_id || d.items[0].id })); }).catch(() => {});
-    api.ctoSegmentos().then(setCat).catch(() => {});
+    // La oferta del backoffice se filtra por el CANAL del backoffice (H-185/H-199): una línea "solo web"
+    // no se puede originar por sucursal, así que no debe listarse en el asistente. El canal sale de cat.
+    const cargarOferta = (canal?: string) =>
+      api.ppOferta(canal ? { canal } : {}).then((d) => { setLineas(d.items); if (d.items[0]) setForm((f: any) => ({ ...f, producto_id: f.producto_id || d.items[0].id })); }).catch(() => {});
+    api.ctoSegmentos().then((c: any) => { setCat(c); cargarOferta(c?.canalBackoffice); }).catch(() => { cargarOferta(); });
   }, []);
+
+  // Vuelta de "Clientes → Maestro": vincula el cliente recién creado a la solicitud express.
+  useEffect(() => {
+    const sid = params.get("vincular"); const cid = params.get("cliente");
+    if (!sid || !cid) return;
+    (async () => {
+      try {
+        const r = await api.ppSolicitudPromover(sid, { cliente_id: Number(cid) });
+        setSel(r.solicitud); avisar("Cliente vinculado a la solicitud.");
+      } catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
+      finally { setParams({}, { replace: true }); cargar(); }
+    })();
+  }, [params]);   // eslint-disable-line
+
+  // Typeahead del modal "Vincular cliente" (express): elegir un cliente ya existente del maestro.
+  useEffect(() => {
+    const qq = vincQ.trim();
+    if (!vincSol || qq.length < 2) { setVincList([]); return; }
+    let vivo = true;
+    const t = setTimeout(async () => {
+      try { const r = await api.clientes({ q: qq, limit: 8 }); if (vivo) setVincList(r.items); }
+      catch { if (vivo) setVincList([]); }
+    }, 300);
+    return () => { vivo = false; clearTimeout(t); };
+  }, [vincQ, vincSol]);
 
   // Buscador de clientes (typeahead) del wizard: el cliente se elige del maestro, no se carga a mano.
   useEffect(() => {
@@ -81,7 +137,10 @@ export default function SolicitudesCredito() {
   const abrirNueva = () => { setNueva(true); setSel(null); setPaso(1); setSim(null); setErr(""); setCliSel(null); setCliQ(""); setClis([]); setForm((f: any) => ({ ...f, cliente_id: "" })); };
   const cerrarNueva = () => { setNueva(false); setPaso(1); setSim(null); };
 
-  const paso1OK = !!form.cliente_id;   // la solicitud es para un cliente REGISTRADO (elegido del maestro)
+  // Edad opcional, pero si se carga debe estar en el rango que valida el backend (18–99). Se bloquea
+  // "Continuar" antes de llegar a un alta que el backend rechazaría (H-200).
+  const edadInvalida = form.edad !== "" && form.edad != null && (Number(form.edad) < 18 || Number(form.edad) > 99);
+  const paso1OK = !!form.cliente_id && !edadInvalida;   // solicitud para un cliente REGISTRADO (del maestro)
   const paso2OK = !!form.producto_id && Number(form.monto_solicitado) > 0 && Number(form.plazo_solicitado) > 0;
 
   const simular = async () => {
@@ -97,9 +156,16 @@ export default function SolicitudesCredito() {
     } catch (e: any) { setSim(null); setErr(e.message || String(e)); }
     finally { setSimulando(false); }
   };
+  // Simulación EN VIVO (H-195): al entrar al paso 2 o cambiar línea/monto/plazo, recalcula solo (debounce).
+  useEffect(() => {
+    if (!nueva || paso !== 2 || !paso2OK) return;
+    const t = setTimeout(() => { simular(); }, 450);
+    return () => clearTimeout(t);
+  }, [nueva, paso, form.producto_id, form.monto_solicitado, form.plazo_solicitado]);   // eslint-disable-line
 
-  const crear = async () => {
-    setErr("");
+  const [creando, setCreando] = useState(false);
+  const crear = async (enviar = false) => {
+    setErr(""); setCreando(true);
     try {
       const payload = {
         ...form,
@@ -107,62 +173,73 @@ export default function SolicitudesCredito() {
         edad: form.edad ? Number(form.edad) : null,
         antiguedad_meses: form.antiguedad_meses ? Number(form.antiguedad_meses) : null,
       };
-      const s = await api.ppSolicitudCrear(payload);
+      let s = await api.ppSolicitudCrear(payload);
+      if (enviar) {   // crear y mandar a evaluación en un paso (queda en el Inbox)
+        try { const r: any = await api.ppSolicitudEstado(s.id, "enviar", "", ""); if (r?.id) s = r; } catch { /* si falla el envío, queda en borrador */ }
+      }
       cerrarNueva(); setSel(s); cargar();
     } catch (e: any) { setErr(e.message || String(e)); }
+    finally { setCreando(false); }
   };
 
-  const accion = async (s: any, acc: string) => {
-    let motivo = "";
-    if (acc === "rechazar" || acc === "anular") { motivo = (await pedirTexto({ titulo: acc === "rechazar" ? "Rechazar solicitud" : "Anular solicitud", mensaje: `Motivo de ${acc}:`, requerido: acc === "rechazar" })) || ""; if (acc === "rechazar" && !motivo) return; }
-    try { const r = await api.ppSolicitudEstado(s.id, acc, motivo); setSel(r); cargar(); }
-    catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
+  // Originación (núcleo, sin confirm): el contrato queda A_LIQUIDAR; el desembolso va por lote (H-135).
+  const originarContrato = async (s: any, observacion = "") => {
+    const c = await api.ctoOriginar({
+      producto_id: s.productoId, cliente_nombre: s.clienteNombre, monto: s.monto, plazo: s.plazo,
+      segmento: s.segmento || undefined, canal: s.canal || undefined,
+      edad: s.edad ?? undefined, antiguedad_meses: s.antiguedadMeses ?? undefined,
+      relacion: s.relacion || undefined, solicitud_pp_id: s.id,
+      datos_adicionales: { destino: s.datosAdicionales?.destino || "", cbu: s.datosAdicionales?.cbu || "",
+                           observaciones: observacion.trim() || s.datosAdicionales?.observaciones || "" },
+      desembolsar: false,
+    });
+    const rec = await api.ppSolicitudes({ estado: filtro, q }).then((d) => d.items.find((x: any) => x.id === s.id)).catch(() => null);
+    cargar(); setSel(rec || null);
+    return c;
   };
-  // Alta en el maestro = mini-revisión: precarga nombre/DNI declarados y el asesor completa el CUIL (H-137).
-  const abrirAlta = (s: any) => {
+
+  // Acción sobre la solicitud abierta (panel flotante), con la observación del asesor.
+  const resolver = async (acc: string) => {
+    const s = sel; if (!s) return;
+    setDetErr("");
+    if (acc === "rechazar" && !obs.trim()) { setDetErr("Para rechazar, escribí el motivo en Observación."); return; }
+    if (acc === "anular" && !(await confirmar({ titulo: "Anular solicitud", confirmar: "Anular",
+      mensaje: `¿Anular ${s.numero}? Es una baja administrativa del trámite (no una decisión crediticia).` }))) return;
+    setAccionando(true);
+    try {
+      if (acc === "originar") {
+        const c = await originarContrato(s, obs);
+        avisar(`Contrato originado: ${c.numeroContrato || c.numero_contrato || ""} · quedó A LIQUIDAR para el desembolso por lote.`);
+      } else {
+        const motivo = (acc === "rechazar" || acc === "anular") ? obs.trim() : "";
+        const r = await api.ppSolicitudEstado(s.id, acc, motivo, obs.trim());
+        setSel(r); cargar();
+      }
+    } catch (e: any) { setDetErr(e.message || String(e)); }
+    finally { setAccionando(false); }
+  };
+
+  // Alta al maestro: se hace en Clientes → Maestro (form completo). Vamos con los datos declarados precargados
+  // y una marca para volver y vincular el cliente creado a esta solicitud.
+  const irAltaMaestro = (s: any) => {
     const cd = s.clienteDatos || {};
-    setAlta({ apellido_nombre: cd.apellido_nombre || s.clienteNombre || "", dni: cd.dni || "", cuil: cd.cuil || "" });
-    setAltaSol(s); setAltaErr("");
+    const qs = new URLSearchParams({ alta: "1", sid: String(s.id), sol: s.numero || "",
+      nombre: cd.apellido_nombre || s.clienteNombre || "", dni: cd.dni || "", cuil: cd.cuil || "" });
+    nav(`/clientes/maestro?${qs.toString()}`);
   };
-  const cuilDigits = (alta.cuil || "").replace(/\D/g, "");
-  const altaOK = !!alta.apellido_nombre.trim() && (cuilDigits.length === 0 || cuilDigits.length === 11);
-  const confirmarAlta = async () => {
-    if (!altaSol) return;
-    setAltaErr("");
+  // Vincular un cliente existente del maestro a la solicitud express.
+  const vincularCliente = async (c: any) => {
+    if (!vincSol) return;
+    setVincErr("");
     try {
-      const r = await api.ppSolicitudPromover(altaSol.id, { apellido_nombre: alta.apellido_nombre.trim(), dni: alta.dni, cuil: cuilDigits });
-      setAltaSol(null); setSel(r.solicitud); cargar();
-      avisar(r.yaExistia ? "Cliente ya existía en el maestro; vinculado." : "Cliente dado de alta en el maestro.");
-    } catch (e: any) { setAltaErr(e.message || String(e)); }
-  };
-  const originar = async (s: any) => {
-    // La solicitud ya trae los datos (los ves en el panel de revisión): originar es revisar y confirmar.
-    // El contrato queda A_LIQUIDAR y el desembolso pasa por la liquidación por lote (H-135).
-    if (!(await confirmar({ titulo: "Originar contrato", confirmar: "Originar", mensaje: `Originar el contrato de ${s.clienteNombre} por ${money(s.monto)} a ${s.plazo} cuotas.\n\nQueda A LIQUIDAR (el desembolso se hace por lote). ¿Confirmás?` }))) return;
-    try {
-      const c = await api.ctoOriginar({
-        producto_id: s.productoId, cliente_nombre: s.clienteNombre, monto: s.monto, plazo: s.plazo,
-        segmento: s.segmento || undefined, canal: s.canal || undefined,
-        edad: s.edad ?? undefined, antiguedad_meses: s.antiguedadMeses ?? undefined,
-        relacion: s.relacion || undefined, solicitud_pp_id: s.id,
-        datos_adicionales: { destino: s.datosAdicionales?.destino || "", cbu: s.datosAdicionales?.cbu || "" },
-        desembolsar: false,
-      });
-      cargar();
-      const rec = await api.ppSolicitudes({ estado: filtro, q }).then((d) => d.items.find((x: any) => x.id === s.id)).catch(() => null);
-      setSel(rec || null);
-      avisar(`Contrato originado: ${c.numeroContrato || c.numero_contrato || ""} · quedó A LIQUIDAR para el desembolso por lote.`);
-    } catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
+      const r = await api.ppSolicitudPromover(vincSol.id, { cliente_id: c.id });
+      setVincSol(null); setVincQ(""); setVincList([]); setSel(r.solicitud); cargar();
+      avisar(`Cliente ${c.apellido_nombre} vinculado a la solicitud.`);
+    } catch (e: any) { setVincErr(e.message || String(e)); }
   };
 
-  const acciones = (s: any) => {
-    const a: { l: string; acc: string; can: boolean }[] = [];
-    if (s.estado === "BORRADOR") a.push({ l: "Enviar a evaluación", acc: "enviar", can: (permisos.edita && !soloLectura) });
-    if (s.estado === "EN_EVALUACION") { a.push({ l: "Aprobar", acc: "aprobar", can: (permisos.aprueba && !soloLectura) }); a.push({ l: "Rechazar", acc: "rechazar", can: (permisos.aprueba && !soloLectura) }); }
-    if (!["ORIGINADA", "ANULADA"].includes(s.estado)) a.push({ l: "Anular", acc: "anular", can: (permisos.edita && !soloLectura) });
-    return a;
-  };
-
+  const puedeEditar = permisos.edita && !soloLectura;
+  const puedeAprobar = permisos.aprueba && !soloLectura;
   const filtrados = useMemo(() => items, [items]);
 
   return (
@@ -238,13 +315,13 @@ export default function SolicitudesCredito() {
                       {cat.segmentos.map((s) => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </label>
-                  <label>Canal
-                    <select value={form.canal} onChange={(e) => setForm({ ...form, canal: e.target.value })}>
-                      {cat.canales.map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </label>
-                  <label>Edad<input type="number" value={form.edad} onChange={(e) => setForm({ ...form, edad: e.target.value })} /></label>
-                  <label>Antigüedad (meses)<input type="number" value={form.antiguedad_meses} onChange={(e) => setForm({ ...form, antiguedad_meses: e.target.value })} /></label>
+                  <label>Edad <small className="muted">(18–99)</small>
+                    <input type="number" min={18} max={99} step={1} value={form.edad}
+                      onChange={(e) => setForm({ ...form, edad: clampNum(e.target.value, 0, 99) })} />
+                    {edadInvalida && <small className="cfgc-err" style={{ marginTop: 4 }}>La edad debe estar entre 18 y 99.</small>}</label>
+                  <label>Antigüedad (meses) <small className="muted">(0–1200)</small>
+                    <input type="number" min={0} max={1200} step={1} value={form.antiguedad_meses}
+                      onChange={(e) => setForm({ ...form, antiguedad_meses: clampNum(e.target.value, 0, 1200) })} /></label>
                   <label>Relación
                     <select value={form.relacion} onChange={(e) => setForm({ ...form, relacion: e.target.value })}>
                       {RELACIONES.map((r) => <option key={r} value={r}>{r}</option>)}
@@ -262,11 +339,11 @@ export default function SolicitudesCredito() {
                         {lineas.map((l) => <option key={l.id} value={l.id}>{l.nombre} ({l.codigo})</option>)}
                       </select>
                     </label>
-                    <label>Monto <span className="req">*</span><input type="number" min="1" value={form.monto_solicitado} onChange={(e) => { setForm({ ...form, monto_solicitado: Number(e.target.value) }); setSim(null); }} /></label>
-                    <label>Plazo (cuotas) <span className="req">*</span><input type="number" min="1" value={form.plazo_solicitado} onChange={(e) => { setForm({ ...form, plazo_solicitado: Number(e.target.value) }); setSim(null); }} /></label>
+                    <label>Monto <span className="req">*</span><input type="number" min={1} max={999999999} step={1} value={form.monto_solicitado} onChange={(e) => { setForm({ ...form, monto_solicitado: Math.max(0, Math.min(999999999, Math.floor(Number(e.target.value) || 0))) }); setSim(null); }} /></label>
+                    <label>Plazo (cuotas) <span className="req">*</span> <small className="muted">(1–240)</small><input type="number" min={1} max={240} step={1} value={form.plazo_solicitado} onChange={(e) => { setForm({ ...form, plazo_solicitado: Math.max(0, Math.min(240, Math.floor(Number(e.target.value) || 0))) }); setSim(null); }} /></label>
                   </div>
-                  <div style={{ marginTop: 10 }}>
-                    <button className="btn" onClick={simular} disabled={!paso2OK || simulando}>{simulando ? "Simulando…" : "↻ Simular"}</button>
+                  <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+                    {simulando ? "Calculando…" : paso2OK ? "La simulación se recalcula automáticamente al cambiar los datos." : "Completá línea, monto y plazo para simular."}
                   </div>
                   {sim && (
                     <div className="sol-sim">
@@ -321,7 +398,10 @@ export default function SolicitudesCredito() {
               {paso > 1 && <button className="btn" onClick={() => setPaso(paso - 1)}>← Volver</button>}
               {paso === 1 && <button className="btn primary" disabled={!paso1OK} onClick={() => { setPaso(2); if (!sim) simular(); }}>Continuar →</button>}
               {paso === 2 && <button className="btn primary" disabled={!paso2OK} onClick={() => setPaso(3)}>Continuar →</button>}
-              {paso === 3 && <button className="btn primary" onClick={crear}>Crear (queda en borrador)</button>}
+              {paso === 3 && <>
+                <button className="btn" disabled={creando} onClick={() => crear(false)}>Guardar borrador</button>
+                <button className="btn primary" disabled={creando} onClick={() => crear(true)} title="Crea la solicitud y la manda a evaluación (queda en el Inbox para aprobar)">{creando ? "Creando…" : "Crear y enviar a evaluación"}</button>
+              </>}
             </div>
           </div>
         </div>
@@ -347,96 +427,135 @@ export default function SolicitudesCredito() {
       </table>
 
       {sel && (
-        <div className="sol-detalle">
-          <h3>{sel.numero} · {sel.clienteNombre} <span className={"pill " + (ESTADO_CLASS[sel.estado] || "")}>{sel.estado}</span></h3>
-          <div className="sol-grid">
-            <div><small>Línea</small><b>{lineas.find((l) => l.id === sel.productoId)?.nombre || sel.productoId}</b></div>
-            <div><small>Monto</small><b>{money(sel.monto)}</b></div>
-            <div><small>Plazo</small><b>{sel.plazo} cuotas</b></div>
-            <div><small>TNA ofrecida</small><b>{sel.evaluacion?.tna_ofrecida ?? "—"}%</b></div>
-            <div><small>Cuota estimada</small><b>{money(sel.evaluacion?.cuota_estimada || 0)}</b></div>
-            <div><small>Relación</small><b>{sel.relacion}</b></div>
-            {sel.datosAdicionales?.destino && <div><small>Destino</small><b>{DESTINO[sel.datosAdicionales.destino] || sel.datosAdicionales.destino}</b></div>}
-          </div>
-          {sel.datosAdicionales?.sueldo_declarado && (
-            <p className="muted" style={{ marginTop: 6 }}>
-              Sueldo {sel.datosAdicionales.haberes_fuente === "micatamarca" ? "verificado" : "declarado"}: {money(sel.datosAdicionales.sueldo_declarado)}
-              {sel.datosAdicionales.afectacion != null && <> · afectación {sel.datosAdicionales.afectacion}%</>}
-              {sel.datosAdicionales.haberes_fuente === "micatamarca" && <span className="pill ok" style={{ marginLeft: 8 }}>✓ Mi Catamarca</span>}
-            </p>
-          )}
-          {sel.evaluacion?.motivos?.length > 0 && (
-            <p className="cfgc-err" style={{ marginTop: 8 }}>No elegible: {sel.evaluacion.motivos.join(" · ")}</p>
-          )}
-          {sel.motivoRechazo && <p className="muted">Motivo: {sel.motivoRechazo}</p>}
-          {docs.length > 0 && (
-            <div className="sol-docs">
-              <small>Documentación del solicitante</small>
-              {docs.map((d) => (
-                <div className="sol-doc" key={d.id}>
-                  <span className="pill">{TIPODOC[d.tipo] || d.tipo}</span>
-                  <button className="sol-doc-link" onClick={() => api.ppSolicitudDocAbrir(sel.id, d.id)}>{d.nombre}</button>
-                  <span className="muted" style={{ fontSize: 12 }}>{kb(d.tamano)}</span>
-                </div>
-              ))}
+        <div className="sol-modal-scrim" onClick={() => setSel(null)}>
+          <div className="sol-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 760 }}>
+            <div className="sol-modal-head">
+              <h3>{sel.numero} · {sel.clienteNombre} <span className={"pill " + (ESTADO_CLASS[sel.estado] || "")}>{sel.estado}</span>
+                {sel.solicitanteTipo === "NO_REGISTRADO" && <span className="pill" style={{ marginLeft: 6, fontSize: 9 }}>express</span>}</h3>
+              <button className="sol-modal-x" onClick={() => setSel(null)} title="Cerrar">✕</button>
             </div>
-          )}
-          {sel.datosLiquidacion?.aplica && (
-            <div className="sol-revli">
-              <small>Revisión para liquidar {sel.datosLiquidacion.lista
-                ? <span className="pill ok" style={{ marginLeft: 6 }}>lista</span>
-                : <span className="pill warn" style={{ marginLeft: 6 }}>faltan datos</span>}</small>
-              <div className="sol-revli-items">
-                {sel.datosLiquidacion.items.map((it: any) => (
-                  <div className={`sol-revli-item ${it.ok ? "ok" : it.requerido ? "crit" : "warn"}`} key={it.campo}>
-                    <span className="sol-revli-ck">{it.ok ? "✓" : it.requerido ? "✕" : "○"}</span>
-                    <span className="sol-revli-lbl">{it.label}{!it.requerido && <em> (opcional)</em>}</span>
-                    <span className="sol-revli-val">{it.ok ? (it.valor || "—") : (it.requerido ? "falta" : "—")}</span>
-                  </div>
-                ))}
+            <div className="sol-modal-body">
+              {detErr && <div className="cfgc-err" style={{ marginBottom: 10 }}>{detErr}</div>}
+              <div className="sol-grid">
+                <div><small>Línea</small><b>{lineas.find((l) => l.id === sel.productoId)?.nombre || sel.productoId}</b></div>
+                <div><small>Monto</small><b>{money(sel.monto)}</b></div>
+                <div><small>Plazo</small><b>{sel.plazo} cuotas</b></div>
+                <div><small>TNA ofrecida</small><b>{sel.evaluacion?.tna_ofrecida ?? "—"}%</b></div>
+                <div><small>Cuota estimada</small><b>{money(sel.evaluacion?.cuota_estimada || 0)}</b></div>
+                <div><small>Relación</small><b>{sel.relacion}</b></div>
+                {sel.datosAdicionales?.destino && <div><small>Destino</small><b>{DESTINO[sel.datosAdicionales.destino] || sel.datosAdicionales.destino}</b></div>}
+                {sel.datosAdicionales?.cbu && <div><small>CBU</small><b>{sel.datosAdicionales.cbu}</b></div>}
+                {sel.datosAdicionales?.sueldo_declarado && <div><small>Sueldo {sel.datosAdicionales.haberes_fuente === "micatamarca" ? "verificado" : "declarado"}</small><b>{money(sel.datosAdicionales.sueldo_declarado)}{sel.datosAdicionales.afectacion != null && ` · afect. ${sel.datosAdicionales.afectacion}%`}</b></div>}
               </div>
-              {!sel.datosLiquidacion.lista && (
-                <p className="cfgc-err" style={{ marginTop: 6 }}>No se puede originar: completá {sel.datosLiquidacion.faltantes.join(", ")}.</p>
+              {sel.evaluacion?.motivos?.length > 0 && <p className="cfgc-err" style={{ marginTop: 8 }}>No elegible: {sel.evaluacion.motivos.join(" · ")}</p>}
+              {sel.motivoRechazo && <p className="muted" style={{ marginTop: 6 }}>Motivo: {sel.motivoRechazo}</p>}
+              {sel.datosAdicionales?.observaciones && <p className="muted" style={{ marginTop: 6 }}>Nota del solicitante: {sel.datosAdicionales.observaciones}</p>}
+              {docs.length > 0 && (
+                <div className="sol-docs" style={{ marginTop: 10 }}>
+                  <small>Documentación del solicitante</small>
+                  {docs.map((d) => (
+                    <div className="sol-doc" key={d.id}>
+                      <span className="pill">{TIPODOC[d.tipo] || d.tipo}</span>
+                      <button className="sol-doc-link" onClick={() => api.ppSolicitudDocAbrir(sel.id, d.id)}>{d.nombre}</button>
+                      <span className="muted" style={{ fontSize: 12 }}>{kb(d.tamano)}</span>
+                    </div>
+                  ))}
+                </div>
               )}
+              {sel.datosLiquidacion?.aplica && (
+                <div className="sol-revli">
+                  <small>Revisión para liquidar {sel.datosLiquidacion.lista
+                    ? <span className="pill ok" style={{ marginLeft: 6 }}>lista</span>
+                    : <span className="pill warn" style={{ marginLeft: 6 }}>faltan datos</span>}</small>
+                  <div className="sol-revli-items">
+                    {sel.datosLiquidacion.items.map((it: any) => (
+                      <div className={`sol-revli-item ${it.ok ? "ok" : it.requerido ? "crit" : "warn"}`} key={it.campo}>
+                        <span className="sol-revli-ck">{it.ok ? "✓" : it.requerido ? "✕" : "○"}</span>
+                        <div className="sol-revli-txt">
+                          <span className="sol-revli-lbl">{it.label}{!it.requerido && <em> (opcional)</em>}</span>
+                          <span className="sol-revli-val">{it.ok ? (it.valor || "—") : (it.requerido ? "falta" : "—")}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {!sel.datosLiquidacion.lista && <p className="cfgc-err" style={{ marginTop: 6 }}>No se puede originar: completá {sel.datosLiquidacion.faltantes.join(", ")}.</p>}
+                </div>
+              )}
+              <div style={{ marginTop: 14 }}>
+                <button className={`sol-crono-toggle ${cronoAbierto ? "abierto" : ""}`} onClick={() => setCronoAbierto((v) => !v)}>
+                  <span className="chev">▶</span>
+                  <span>Cronograma estimado{crono.length > 0 ? ` · ${crono.length} cuotas` : ""}{cargandoCrono ? " · calculando…" : ""}</span>
+                </button>
+                {cronoAbierto && crono.length > 0 && (
+                  <div className="sol-crono-wrap" style={{ marginTop: 8 }}>
+                    <table className="sol-crono">
+                      <thead><tr><th>Cuota</th><th>Vencimiento</th><th>Capital</th><th>Interés</th><th>Total</th></tr></thead>
+                      <tbody>
+                        {crono.map((q) => (
+                          <tr key={q.numero_cuota}>
+                            <td className="num">{q.numero_cuota}</td><td>{q.fecha_vencimiento}</td>
+                            <td className="num">{money(q.capital)}</td><td className="num">{money(q.interes)}</td>
+                            <td className="num"><b>{money(q.total)}</b></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {cronoAbierto && !cargandoCrono && crono.length === 0 && <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>Sin cronograma disponible.</p>}
+              </div>
+              {!["ORIGINADA", "ANULADA"].includes(sel.estado) && (
+                <label style={{ display: "block", marginTop: 12 }}>Observación del asesor <span className="muted">(opcional; para rechazar es el motivo)</span>
+                  <textarea value={obs} rows={2} style={{ width: "100%" }} maxLength={500}
+                    onChange={(e) => setObs(e.target.value)} placeholder="Nota interna que queda registrada en la solicitud…" />
+                </label>
+              )}
+              {sel.estado === "ORIGINADA" && sel.contratoId && <p style={{ marginTop: 12 }}><span className="pill brand">Originada · contrato {sel.contratoId.slice(0, 8)}</span></p>}
             </div>
-          )}
-          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-            {acciones(sel).map((a) => (
-              <button key={a.acc} className="btn" disabled={!a.can} onClick={() => accion(sel, a.acc)}>{a.l}</button>
-            ))}
-            {sel.solicitanteTipo === "NO_REGISTRADO" && (permisos.edita && !soloLectura) && <button className="btn" onClick={() => abrirAlta(sel)}>Dar de alta en maestro</button>}
-            {sel.estado === "APROBADA" && <button className="btn primary" disabled={sel.datosLiquidacion?.aplica && !sel.datosLiquidacion?.lista}
-              title={sel.datosLiquidacion?.aplica && !sel.datosLiquidacion?.lista ? "Faltan datos para liquidar" : ""}
-              onClick={() => originar(sel)}>💸 Originar contrato</button>}
-            {sel.estado === "ORIGINADA" && sel.contratoId && <span className="pill brand">Originada · contrato {sel.contratoId.slice(0, 8)}</span>}
+            <div className="sol-modal-foot" style={{ flexWrap: "wrap" }}>
+              <button className="btn" onClick={() => setSel(null)}>Cerrar</button>
+              <div style={{ flex: 1 }} />
+              {sel.solicitanteTipo === "NO_REGISTRADO" && puedeEditar && <>
+                <button className="btn" onClick={() => irAltaMaestro(sel)} title="Crea el cliente en Clientes → Maestro (formulario completo) y vuelve a vincularlo.">Dar de alta en maestro</button>
+                <button className="btn" onClick={() => { setVincSol(sel); setVincQ(""); setVincList([]); setVincErr(""); }} title="Vincular un cliente que ya existe en el maestro.">Vincular cliente</button>
+              </>}
+              {sel.estado === "BORRADOR" && <button className="btn primary" disabled={accionando || !puedeEditar} onClick={() => resolver("enviar")}>Enviar a evaluación</button>}
+              {!["ORIGINADA", "ANULADA"].includes(sel.estado) && <button className="btn" disabled={accionando || !puedeEditar} title="Baja administrativa del trámite (error de carga, duplicada o el cliente desistió). No es una decisión crediticia." onClick={() => resolver("anular")}>Anular</button>}
+              {sel.estado === "EN_EVALUACION" && <>
+                <button className="btn" disabled={accionando || !puedeAprobar} title="Decisión crediticia NEGATIVA: se evaluó y se deniega. Requiere rol aprobador y motivo (Observación)." onClick={() => resolver("rechazar")}>Rechazar</button>
+                <button className="btn primary" disabled={accionando || !puedeAprobar} title="Aprueba el crédito (decisión crediticia). Requiere rol aprobador." onClick={() => resolver("aprobar")}>Aprobar</button>
+              </>}
+              {sel.estado === "APROBADA" && <button className="btn primary" disabled={accionando || (sel.datosLiquidacion?.aplica && !sel.datosLiquidacion?.lista)}
+                title={sel.datosLiquidacion?.aplica && !sel.datosLiquidacion?.lista ? "Faltan datos para liquidar" : ""}
+                onClick={() => resolver("originar")}>💸 Originar contrato</button>}
+            </div>
           </div>
         </div>
       )}
 
-      {altaSol && (
-        <div className="sol-modal-scrim" onClick={() => setAltaSol(null)}>
-          <div className="sol-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480 }}>
+      {vincSol && (
+        <div className="sol-modal-scrim" onClick={() => setVincSol(null)}>
+          <div className="sol-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
             <div className="sol-modal-head">
-              <h3>Dar de alta en el maestro</h3>
-              <button className="sol-modal-x" onClick={() => setAltaSol(null)} title="Cerrar">✕</button>
+              <h3>Vincular cliente del maestro</h3>
+              <button className="sol-modal-x" onClick={() => setVincSol(null)} title="Cerrar">✕</button>
             </div>
             <div className="sol-modal-body">
-              <p className="muted" style={{ marginTop: 0 }}>Revisá los datos del solicitante y completá el CUIL antes de crear el cliente en el maestro.</p>
-              {altaErr && <div className="cfgc-err" style={{ marginBottom: 10 }}>{altaErr}</div>}
-              <div className="sol-grid">
-                <label>Apellido y nombre<input value={alta.apellido_nombre} onChange={(e) => setAlta({ ...alta, apellido_nombre: e.target.value })} /></label>
-                <label>DNI<input className="num" value={alta.dni} onChange={(e) => setAlta({ ...alta, dni: e.target.value.replace(/\D/g, "").slice(0, 9) })} /></label>
-                <label>CUIL (11 dígitos)
-                  <input className="num" inputMode="numeric" value={alta.cuil} onChange={(e) => setAlta({ ...alta, cuil: e.target.value.replace(/\D/g, "").slice(0, 11) })} placeholder="20304050607" />
-                  {cuilDigits.length > 0 && cuilDigits.length !== 11 && <span className="hint" style={{ color: "var(--warn)" }}>Faltan {11 - cuilDigits.length} dígito(s).</span>}
-                </label>
-              </div>
+              <p className="muted" style={{ marginTop: 0 }}>Elegí el cliente ya existente para vincular a <b>{vincSol.numero}</b>. Si todavía no existe, usá <b>Dar de alta en maestro</b>.</p>
+              {vincErr && <div className="cfgc-err" style={{ marginBottom: 10 }}>{vincErr}</div>}
+              <input style={{ width: "100%" }} value={vincQ} placeholder="Buscar por apellido y nombre, CUIL o DNI…" onChange={(e) => setVincQ(e.target.value)} />
+              {vincList.length > 0 && (
+                <div style={{ marginTop: 8, maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+                  {vincList.map((c) => (
+                    <button type="button" key={c.id} className="btn" style={{ justifyContent: "flex-start", textAlign: "left", fontWeight: 400 }} onClick={() => vincularCliente(c)}>
+                      <b>{c.apellido_nombre}</b>&nbsp;— {c.id_cliente || c.id} · CUIL {c.cuil || "—"} · DNI {c.dni || "—"}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {vincQ.trim().length >= 2 && vincList.length === 0 && <p className="hint" style={{ marginTop: 6 }}>Sin resultados.</p>}
             </div>
-            <div className="sol-modal-foot">
-              <button className="btn" onClick={() => setAltaSol(null)}>Cancelar</button>
-              <div style={{ flex: 1 }} />
-              <button className="btn primary" disabled={!altaOK} onClick={confirmarAlta}>Dar de alta</button>
-            </div>
+            <div className="sol-modal-foot"><button className="btn" onClick={() => setVincSol(null)}>Cancelar</button></div>
           </div>
         </div>
       )}

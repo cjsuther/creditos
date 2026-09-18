@@ -139,6 +139,36 @@ def test_promover_cliente_express_al_maestro(client):
     r = client.post(f"/api/solicitudes/{s['id']}/promover-cliente", headers=h, json={})
     assert r.status_code == 200
     assert r.json()["solicitud"]["solicitanteTipo"] == "REGISTRADO" and r.json()["clienteId"]
+    # H-169: el id_cliente en el maestro NO es el CUIL ni un N° de solicitud, es autogenerado (CL-<pk>)
+    cid = r.json()["clienteId"]
+    cli = client.get(f"/api/clientes/{cid}", headers=h).json()
+    assert cli["id_cliente"] == f"CL-{cid:06d}"
+    assert not cli["id_cliente"].startswith("SOL-") and cli["id_cliente"] != cli["cuil"]
+
+
+def test_promover_vincular_cliente_existente(client):
+    """H-170: una express se puede VINCULAR a un cliente que ya existe en el maestro (alta hecha en
+    Clientes → Maestro), pasando cliente_id — no crea uno nuevo."""
+    h = _auth(client)
+    cid = _cliente_id(client, h)   # un cliente del maestro
+    s = client.post("/api/solicitudes", headers=h, json=_base(client, h, solicitante_tipo="NO_REGISTRADO",
+                    cliente_id=None, cliente_datos={"apellido_nombre": "GARCIA, LUIS", "dni": "30111222", "cuil": "20301112223"})).json()
+    assert "id" in s, s
+    r = client.post(f"/api/solicitudes/{s['id']}/promover-cliente", headers=h, json={"cliente_id": cid})
+    assert r.status_code == 200
+    assert r.json()["clienteId"] == cid and r.json()["solicitud"]["solicitanteTipo"] == "REGISTRADO"
+    # cliente inexistente -> 404
+    assert client.post(f"/api/solicitudes/{s['id']}/promover-cliente", headers=h, json={"cliente_id": 999999}).status_code in (404, 409)
+
+
+def test_estado_guarda_observacion(client):
+    """H-170: la observación del asesor al resolver queda registrada en datos_adicionales.obs_revision."""
+    h = _auth(client)
+    s = client.post("/api/solicitudes", headers=h, json=_base(client, h)).json()
+    r = client.post(f"/api/solicitudes/{s['id']}/estado", headers=h,
+                    json={"accion": "anular", "observacion": "Duplicada de la SOL previa"}).json()
+    assert r["estado"] == "ANULADA"
+    assert r["datosAdicionales"]["obs_revision"] == "Duplicada de la SOL previa"
 
 
 def test_permiso_carga(client):

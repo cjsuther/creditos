@@ -467,3 +467,52 @@ def test_simular_preview_no_persiste_y_evalua(client):
     assert d2["elegible"] is False and d2["motivos"]
     # No persiste: el conteo de simulaciones guardadas no cambió.
     assert client.get(f"/api/productos/{pid}/simulaciones", headers=h).json()["total"] == antes
+
+
+def test_duplicar_como_prestamo_independiente(client):
+    """H-190: 'Duplicar' crea un préstamo NUEVO e independiente (copia de la config, código propio),
+    con trazabilidad copiadoDe; 'publicar-directo' lo publica en un paso (cuatro-ojos inactivo); y se puede
+    retirar el original para no ofrecer los dos a la vez."""
+    h = _auth(client)
+    # préstamo origen, publicado en un paso
+    src = client.post("/api/productos", headers=h, json={"nombre": "Origen"}).json()
+    assert client.post(f"/api/productos/{src['id']}/publicar-directo", headers=h).json()["producto"]["estado"] == "PUBLICADO"
+
+    # duplicar → préstamo nuevo, independiente, borrador, con copiadoDe apuntando al origen
+    dup = client.post("/api/productos", headers=h, json={"copiar_de": src["id"], "nombre": "Origen — copia"}).json()
+    assert dup["id"] != src["id"] and dup["codigo"] != src["codigo"] and dup["estado"] == "BORRADOR"
+    det = client.get(f"/api/productos/{dup['id']}", headers=h).json()
+    assert det["copiadoDe"] and det["copiadoDe"]["id"] == src["id"] and det["copiadoDe"]["publicado"] is True
+
+    # publicar la copia en un paso
+    r = client.post(f"/api/productos/{dup['id']}/publicar-directo", headers=h).json()
+    assert r["needs_approval"] is False and r["producto"]["estado"] == "PUBLICADO"
+    # ambos publicados (independientes) hasta que se retire el original
+    cat = {p["id"]: p for p in client.get("/api/productos", headers=h).json()["items"]}
+    assert cat[src["id"]]["estado"] == "PUBLICADO" and cat[dup["id"]]["estado"] == "PUBLICADO"
+
+    # retirar el original
+    assert client.post(f"/api/productos/{src['id']}/estado", headers=h, json={"accion": "retirar"}).json()["estado"] == "RETIRADO"
+    cat = {p["id"]: p for p in client.get("/api/productos", headers=h).json()["items"]}
+    assert cat[src["id"]]["estado"] == "RETIRADO" and cat[dup["id"]]["estado"] == "PUBLICADO"
+
+
+def test_decimales_calculo_redondea_la_cuota():
+    """H-197: el motor redondea la cuota según `decimales` (Parámetro de créditos DECIMALES_CALCULO)."""
+    from app.services.productos_calc import cronograma
+    from decimal import Decimal
+    f2 = cronograma("FRANCES", 1_000_000, 12, 52, decimales=2)
+    f0 = cronograma("FRANCES", 1_000_000, 12, 52, decimales=0)
+    # con 2 decimales la cuota tiene centavos; con 0 es entera
+    assert f2[0]["total"] == f2[0]["total"].quantize(Decimal("0.01"))
+    assert f0[0]["total"] == f0[0]["total"].quantize(Decimal("1"))
+    assert f0[0]["total"] == f2[0]["total"].quantize(Decimal("1"))
+
+
+def test_parametros_por_ambito(client):
+    """H-197: los parámetros se filtran por ámbito; los de créditos incluyen DECIMALES_CALCULO."""
+    h = _auth(client)
+    cred = {p["clave"] for p in client.get("/api/admin/parametros?ambito=creditos", headers=h).json()}
+    assert {"CANALES", "CANAL_PORTAL", "CANAL_BACKOFFICE", "DECIMALES_CALCULO"} <= cred
+    conta = {p["clave"] for p in client.get("/api/admin/parametros?ambito=contabilidad", headers=h).json()}
+    assert "CUENTAS_EFECTIVO" in conta and "CANALES" not in conta

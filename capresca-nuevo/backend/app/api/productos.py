@@ -163,11 +163,12 @@ def _feriados_engine(db: Session, pais: str = "AR") -> set:
     return feriados_set(db, pais, _d(hoy.year - 1, 1, 1), _d(hoy.year + 15, 12, 31))
 
 
-def _params_cronograma(v: m.PPVersion, feriados: set | None = None) -> dict:
+def _params_cronograma(v: m.PPVersion, feriados: set | None = None, decimales: int = 2) -> dict:
     """Extrae de la versión los parámetros del cronograma (única fuente de verdad).
 
     Sale de las columnas core y de los componentes activos REPAYMENT_SCHEDULE / CHARGE / TAX.
-    Si se pasa `feriados` (del maestro), el ajuste a día hábil los saltea también.
+    Si se pasa `feriados` (del maestro), el ajuste a día hábil los saltea también. `decimales` es la
+    precisión de redondeo de las cuotas (Parámetro de créditos DECIMALES_CALCULO). H-197.
     """
     comps = {c.componente_codigo: c for c in v.componentes if c.activo}
     rs = (comps["REPAYMENT_SCHEDULE"].config or {}) if "REPAYMENT_SCHEDULE" in comps else {}
@@ -187,6 +188,7 @@ def _params_cronograma(v: m.PPVersion, feriados: set | None = None) -> dict:
         "tipo_cuota": rs.get("tipoCuota", "VENCIDA"),
         "financiable": bool(ch.get("financiable", False)),
         "cargo_momento": ch.get("momento", "PRORRATEADO"),
+        "decimales": decimales,
     }
 
 
@@ -199,7 +201,79 @@ def _cargo(v: m.PPVersion, codigo: str) -> float:
 
 # ---------------- disponibilidad / segmentación (Fase E) ----------------
 SEGMENTOS_CATALOGO = ["AGENTE_PUBLICO", "JUBILADO", "PENSIONADO", "DOCENTE", "MUNICIPAL", "CONTRATADO", "LIBRE"]
+# Catálogo de canales y códigos de canal por defecto. El catálogo REAL y qué código corresponde a cada
+# contexto (portal / backoffice) son CONFIGURABLES en Parámetros (H-185): la API no hardcodea "WEB" ni
+# "SUCURSAL", los lee de la tabla `parametros` (claves CANALES / CANAL_PORTAL / CANAL_BACKOFFICE), que se
+# siembran al arrancar y se editan en Controles → Parámetros. Estas constantes son sólo el fallback.
 CANALES_CATALOGO = ["SUCURSAL", "WEB", "APP", "CONVENIO"]
+CANAL_PORTAL_DEFAULT = "WEB"
+CANAL_BACKOFFICE_DEFAULT = "SUCURSAL"
+
+
+def _param_obligatorio(db: Session, clave: str) -> str:
+    """Lee un parámetro de configuración OBLIGATORIO. H-185: los parámetros de canal se siembran al
+    arrancar; si faltan (alguien los borró) la API falla fuerte con un mensaje claro, en vez de asumir
+    un default silencioso que podría abrir un canal por error."""
+    p = db.query(models.Parametro).filter(models.Parametro.clave == clave).first()
+    if not p or not (p.valor or "").strip():
+        raise HTTPException(500, f"Falta el parámetro de configuración obligatorio '{clave}'. "
+                                 f"Cargalo en Controles → Parámetros generales.")
+    return p.valor.strip()
+
+
+def canales_catalogo(db: Session) -> list[str]:
+    """Catálogo de canales habilitados (Parámetro CANALES, coma-separado). Obligatorio."""
+    return [c.strip().upper() for c in _param_obligatorio(db, "CANALES").split(",") if c.strip()]
+
+
+def canal_portal(db: Session) -> str:
+    """Código de canal que habilita el portal del ciudadano (Parámetro CANAL_PORTAL). Obligatorio."""
+    return _param_obligatorio(db, "CANAL_PORTAL").upper()
+
+
+def canal_backoffice(db: Session) -> str:
+    """Canal por defecto al originar desde el backoffice sin canal explícito (CANAL_BACKOFFICE). Obligatorio."""
+    return _param_obligatorio(db, "CANAL_BACKOFFICE").upper()
+
+
+DECIMALES_CALCULO_DEFAULT = 2   # decimales de redondeo del cálculo de la cuota (0–6)
+DECIMALES_MOSTRAR_DEFAULT = 2    # decimales con que se MUESTRAN los importes en pantalla (0–6)
+
+# Parámetros del ámbito CRÉDITOS (H-197/H-198): canales + decimales de cálculo y de visualización.
+CREDITOS_PARAMS_DEFAULT = [
+    ("CANALES", ",".join(CANALES_CATALOGO), "Catálogo de canales de venta habilitados (coma-separado)."),
+    ("CANAL_PORTAL", CANAL_PORTAL_DEFAULT, "Código de canal habilitado en el portal del ciudadano (solo web)."),
+    ("CANAL_BACKOFFICE", CANAL_BACKOFFICE_DEFAULT, "Canal asumido al originar desde el backoffice sin canal explícito."),
+    ("DECIMALES_CALCULO", str(DECIMALES_CALCULO_DEFAULT), "Decimales para el REDONDEO del cálculo de las cuotas (0–6)."),
+    ("DECIMALES_MOSTRAR", str(DECIMALES_MOSTRAR_DEFAULT), "Decimales con que se MUESTRAN los importes de créditos en pantalla (0–6)."),
+]
+
+
+def _decimales_param(db: Session, clave: str, default: int) -> int:
+    p = db.query(models.Parametro).filter(models.Parametro.clave == clave).first()
+    try:
+        return max(0, min(6, int((p.valor if p else str(default)) or default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def decimales_calculo(db: Session) -> int:
+    """Decimales de redondeo para el CÁLCULO de préstamos (Parámetro DECIMALES_CALCULO). H-197."""
+    return _decimales_param(db, "DECIMALES_CALCULO", DECIMALES_CALCULO_DEFAULT)
+
+
+def decimales_mostrar(db: Session) -> int:
+    """Decimales con que se MUESTRAN los importes de créditos en pantalla (Parámetro DECIMALES_MOSTRAR). H-198."""
+    return _decimales_param(db, "DECIMALES_MOSTRAR", DECIMALES_MOSTRAR_DEFAULT)
+
+
+def seed_canales_parametros(db: Session) -> None:
+    """Siembra los parámetros del ámbito CRÉDITOS si faltan (idempotente): canales + decimales de cálculo.
+    Se editan en Créditos → Parámetros de créditos."""
+    for clave, valor, desc in CREDITOS_PARAMS_DEFAULT:
+        if not db.query(models.Parametro).filter(models.Parametro.clave == clave).first():
+            db.add(models.Parametro(clave=clave, valor=valor, descripcion=desc, ambito="creditos"))
+    db.commit()
 
 # ---------------- relationship pricing (Fase G) ----------------
 # Bonificación de TNA (en puntos, negativa = descuento) según la relación integral del cliente.
@@ -355,6 +429,13 @@ def _serial(db: Session, prod: m.PPProducto, calc_map: dict[str, str]) -> dict:
     base = _serial_v(db, prod, _ultima(prod), calc_map)
     vig = _version_publicada_vigente(prod)
     base["vigentePortal"] = vig.numero_version if vig else None
+    # H-190: origen de la copia (para el prompt "¿retirar el original?" al publicar y trazabilidad).
+    base["copiadoDe"] = None
+    if getattr(prod, "copiado_de", None):
+        src = db.get(m.PPProducto, prod.copiado_de)
+        if src:
+            base["copiadoDe"] = {"id": src.id, "codigo": src.codigo, "nombre": src.nombre,
+                                 "publicado": any(x.estado == "PUBLICADO" for x in src.versiones)}
     return base
 
 
@@ -579,7 +660,7 @@ def simular_preview(producto_id: str, data: SimPreviewIn, db: Session = Depends(
     tna = _tna_base(db, v)
     cargo = _cargo(v, "OTORGAMIENTO")
     filas = cronograma(sistema, data.monto, data.plazo, tna, cargo, date.today(),
-                       **_params_cronograma(v, _feriados_engine(db)))
+                       **_params_cronograma(v, _feriados_engine(db), decimales_calculo(db)))
     total = sum(float(f["total"]) for f in filas)
     ctx = {"segmento": data.segmento, "canal": data.canal, "edad": data.edad, "antiguedad_meses": data.antiguedad_meses}
     elig = _elegibilidad(_disponibilidad(v), ctx)
@@ -613,7 +694,7 @@ def crear_simulacion(producto_id: str, data: SimularIn, db: Session = Depends(ge
     tna = data.tna if data.tna is not None else _tna_base(db, v)   # variable = índice + margen
     cargo = _cargo(v, "OTORGAMIENTO")
     filas = cronograma(sistema, data.monto, data.plazo, tna, cargo, date.today(),
-                       **_params_cronograma(v, _feriados_engine(db)))
+                       **_params_cronograma(v, _feriados_engine(db), decimales_calculo(db)))
     total_cuotas = sum(f["total"] for f in filas)
     total_interes = sum(f["interes"] for f in filas)
     s = m.PPSimulacion(
@@ -686,6 +767,9 @@ def _crear_impl(db: Session, data: CrearIn, user) -> dict:
 
     def _mk_prod(codigo: str) -> m.PPProducto:
         p = m.PPProducto(familia_id=fam.id, padre_id=(padre.id if padre else None), codigo=codigo,
+                         # H-190: si es una copia (Duplicar), recordá de qué producto salió (trazabilidad +
+                         # prompt de "retirar el original" al publicar). La derivación (padre) es otra cosa.
+                         copiado_de=(data.copiar_de if data.copiar_de else None),
                          nombre=data.nombre or (f"{fuente.nombre} ({'derivado' if padre else 'copia'})" if fuente else "Nueva línea de crédito"))
         db.add(p)
         return p
@@ -777,6 +861,49 @@ def guardar_config(producto_id: str, cfg: ConfigIn, db: Session = Depends(get_db
     _aplicar_cfg(db, v, data)
     if data.get("componentes") is not None:
         _aplicar_componentes(db, v, data["componentes"])
+    db.commit()
+    return _serial(db, prod, _calc_codigo_por_version(db))
+
+
+class DisponibilidadIn(BaseModel):
+    activo: bool = True
+    canales: list[str] = []
+    segmentos: list[str] = []
+    edadMin: int | None = None
+    edadMax: int | None = None
+    antiguedadMinMeses: int | None = None
+    requiereGarante: bool = False
+    vigenteDesde: str = ""
+    vigenteHasta: str = ""
+
+
+@router.put("/{producto_id}/disponibilidad")
+def editar_disponibilidad(producto_id: str, data: DisponibilidadIn, db: Session = Depends(get_db),
+                          user: models.Usuario = Depends(get_current_user)):
+    """H-189: edita la DISPONIBILIDAD (canales/segmentos/reglas) de la versión VIGENTE, INCLUSO publicada.
+    Los canales/segmentos son metadata de DISTRIBUCIÓN (a quién y por qué canal se ofrece), no términos
+    financieros congelados del producto: cambiarlos no altera contratos ya originados (snapshot) ni el
+    cronograma. Por eso se pueden modificar sin crear una versión nueva. No toca condiciones ni pricing."""
+    _req_edita(db, user)
+    prod = db.get(m.PPProducto, producto_id)
+    if not prod:
+        raise HTTPException(404, "Producto no encontrado")
+    v = _version_efectiva(prod)
+    cfg = {
+        "canales": [str(c).strip().upper() for c in (data.canales or []) if str(c).strip()],
+        "segmentos": [str(s).strip() for s in (data.segmentos or []) if str(s).strip()],
+        "edadMin": data.edadMin, "edadMax": data.edadMax,
+        "antiguedadMinMeses": data.antiguedadMinMeses, "requiereGarante": bool(data.requiereGarante),
+        "vigenteDesde": data.vigenteDesde or "", "vigenteHasta": data.vigenteHasta or "",
+    }
+    row = next((c for c in v.componentes if c.componente_codigo == "AVAILABILITY"), None)
+    if row:
+        row.activo = data.activo
+        row.config = cfg
+    else:
+        db.add(m.PPComponente(producto_version_id=v.id, componente_codigo="AVAILABILITY",
+                              orden=_ORDEN.get("AVAILABILITY", 99), requerido=False,
+                              activo=data.activo, config=cfg))
     db.commit()
     return _serial(db, prod, _calc_codigo_por_version(db))
 
@@ -922,3 +1049,26 @@ def cambiar_estado(producto_id: str, data: AccionIn, db: Session = Depends(get_d
         raise HTTPException(422, f"Acción desconocida: {acc}")
     db.commit()
     return _serial(db, prod, _calc_codigo_por_version(db))
+
+
+@router.post("/{producto_id}/publicar-directo")
+def publicar_directo(producto_id: str, db: Session = Depends(get_db),
+                     user: models.Usuario = Depends(get_current_user)):
+    """H-190: publica el préstamo en UN paso (revisar→aprobar→publicar) cuando el cuatro-ojos (regla LINEA)
+    está INACTIVO. Si está ACTIVO, sólo lo manda a revisión y devuelve needs_approval=True (otra persona
+    aprueba, respetando la separación de funciones). Simplifica el flujo del builder."""
+    prod = db.get(m.PPProducto, producto_id)
+    if not prod:
+        raise HTTPException(404, "Producto no encontrado")
+    from app.services import workflow as wf
+    regla = wf.regla(db, "LINEA")
+    activo_wf = bool(regla and regla.activo)
+    if _ultima(prod).estado == "BORRADOR":
+        cambiar_estado(producto_id, AccionIn(accion="revisar"), db, user)
+    if activo_wf:   # cuatro-ojos activo → queda EN_REVISION para aprobación de un tercero
+        return {"needs_approval": True, "producto": _serial(db, prod, _calc_codigo_por_version(db))}
+    if _ultima(prod).estado == "EN_REVISION":
+        cambiar_estado(producto_id, AccionIn(accion="aprobar"), db, user)
+    if _ultima(prod).estado == "APROBADO":
+        cambiar_estado(producto_id, AccionIn(accion="publicar"), db, user)
+    return {"needs_approval": False, "producto": _serial(db, prod, _calc_codigo_por_version(db))}

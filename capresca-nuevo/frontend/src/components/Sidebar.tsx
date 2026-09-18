@@ -7,25 +7,37 @@ import Logo from "./Logo";
 import { MENU, items } from "../menu";
 import { usePermisos } from "../permisos";
 
-const OCULTOS_KEY = "sidebar_mostrar_ocultos";
+const VER_TODO_KEY = "sidebar_ver_todo";
+// Módulos que se ven COMPLETOS aun en la vista restringida (además de todas las opciones `new`). H-193.
+const SIEMPRE_VISIBLE = new Set(["Clientes", "General"]);
+
+// Perfil del usuario desde el JWT. El botón de vista completa es SÓLO para el administrador (ADMG). H-193.
+function perfilDelToken(): string {
+  try {
+    const t = localStorage.getItem("ccypp_token");
+    if (!t) return "";
+    return JSON.parse(atob(t.split(".")[1])).perfil || "";
+  } catch { return ""; }
+}
 
 export default function Sidebar() {
   const location = useLocation();
   const nav = useNavigate();
-  const { puedeVer, estado } = usePermisos();
-  const esAdmin = estado.sinRestricciones;   // sólo el administrador puede revelar los módulos ocultos
-  const [mostrarOcultos, setMostrarOcultos] = useState<boolean>(() => {
-    try { return localStorage.getItem(OCULTOS_KEY) === "1"; } catch { return false; }
+  const { puedeVer } = usePermisos();
+  const esAdmin = perfilDelToken() === "ADMG";   // sólo el administrador (ADMG) puede alternar la vista completa
+  // El admin por defecto VE TODO y puede "Ocultar" (dejar la vista restringida); los no-admin SIEMPRE ven
+  // la vista restringida: sólo Clientes, General y las opciones marcadas `new`.
+  const [verTodo, setVerTodo] = useState<boolean>(() => {
+    try { return localStorage.getItem(VER_TODO_KEY) !== "0"; } catch { return true; }
   });
-  const toggleOcultos = () => setMostrarOcultos((v) => {
-    const n = !v; try { localStorage.setItem(OCULTOS_KEY, n ? "1" : "0"); } catch { /* ignore */ }
+  const toggleVerTodo = () => setVerTodo((v) => {
+    const n = !v; try { localStorage.setItem(VER_TODO_KEY, n ? "1" : "0"); } catch { /* ignore */ }
     return n;
   });
-  const revelar = esAdmin && mostrarOcultos;   // el admin reveló los módulos/opciones ocultos
-  // Un módulo `oculto` sólo se muestra si el admin reveló; en un módulo `soloNuevos` las opciones
-  // heredadas (sin `nuevo`) también quedan ocultas hasta revelar.
-  const visibles = MENU.filter((m) => !m.oculto || revelar);
-  const moduloActivo = visibles.find((m) => items(m).some((i) => location.pathname.startsWith(i.to)));
+  const restringido = !esAdmin || !verTodo;   // no-admin: siempre; admin: cuando "ocultó"
+  const itemVisible = (m: typeof MENU[number], i: { to: string; nuevo?: boolean }) =>
+    puedeVer(i.to) && (!restringido || SIEMPRE_VISIBLE.has(m.label) || !!i.nuevo);
+  const moduloActivo = MENU.find((m) => items(m).some((i) => location.pathname.startsWith(i.to)));
   const [abierto, setAbierto] = useState<string | null>(moduloActivo?.label ?? "Clientes");
 
   return (
@@ -38,11 +50,11 @@ export default function Sidebar() {
         </div>
       </div>
       <nav className="sidebar-nav">
-        {visibles.map((m) => {
-          // Grupos con al menos una pantalla visible para el perfil (y, en módulos soloNuevos, sólo las
-          // opciones `nuevo` salvo que el admin haya revelado las heredadas).
+        {MENU.map((m) => {
+          // Grupos con al menos una pantalla visible: por permiso del perfil y por la regla de visibilidad
+          // (vista restringida = sólo Clientes/General completos + opciones `new`). H-193.
           const grupos = m.grupos
-            .map((g) => ({ ...g, items: g.items.filter((i) => puedeVer(i.to) && (!m.soloNuevos || i.nuevo || revelar)) }))
+            .map((g) => ({ ...g, items: g.items.filter((i) => itemVisible(m, i)) }))
             .filter((g) => g.items.length > 0);
           if (grupos.length === 0) return null;                 // módulo sin pantallas visibles → oculto
           const expandido = abierto === m.label;
@@ -74,10 +86,10 @@ export default function Sidebar() {
         })}
       </nav>
       {esAdmin && (
-        <button className={`sb-ocultos ${mostrarOcultos ? "on" : ""}`} onClick={toggleOcultos}
-                title="Módulos ocultos (solo administradores)">
-          <Icon name={mostrarOcultos ? "eye" : "eye-off"} size={15} />
-          {mostrarOcultos ? "Ocultar módulos" : "Mostrar módulos ocultos"}
+        <button className={`sb-ocultos ${!verTodo ? "on" : ""}`} onClick={toggleVerTodo}
+                title="Vista restringida: sólo Clientes, General y opciones nuevas (así lo ven los no-administradores)">
+          <Icon name={verTodo ? "eye-off" : "eye"} size={15} />
+          {verTodo ? "Ocultar módulos" : "Mostrar todos los módulos"}
         </button>
       )}
       <button className="sb-salir" onClick={() => { logout(); nav("/login"); }}><Icon name="logout" size={16} /> Salir</button>

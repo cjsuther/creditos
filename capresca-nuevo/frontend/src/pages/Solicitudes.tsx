@@ -136,68 +136,68 @@ export default function Solicitudes() {
       </div>
 
       {detalle && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>
-            Solicitud #{detalle.id} — {detalle.cliente_nombre}{" "}
-            <span className="muted">({ESTADOS[detalle.estado]})</span>
-          </h3>
-          <p>
-            {detalle.linea_nombre} · {money(detalle.monto_solicitado)} ·{" "}
-            {detalle.cantidad_cuotas} cuotas
-            {detalle.margen_disponible != null &&
-              <> · Margen: <b>{money(detalle.margen_disponible)}</b></>}
-          </p>
-          {detalle.advertencias?.map((a: string, i: number) => (
-            <div className="aviso" key={i}>⚠ {a}</div>
-          ))}
-          {detalle.estado === "I" && (
-            <div style={{ marginTop: "0.6rem", display: "flex", gap: "0.5rem" }}>
-              <button
-                onClick={() => otorgar(detalle.id)}
-                disabled={!detalle.puede_otorgarse}
-              >
-                Otorgar crédito
-              </button>
-              {!detalle.puede_otorgarse && (
-                <button onClick={() => otorgar(detalle.id, true)}
-                        style={{ background: "var(--alerta)" }}>
-                  Otorgar igual (forzar)
-                </button>
+        <div className="sold-ov" onMouseDown={(e) => { if (e.target === e.currentTarget) { setDetalle(null); setCredito(null); } }}>
+          <div className="sold-modal">
+            <div className="sold-mh">
+              <div>
+                <div className="eyebrow">Solicitud #{detalle.id} · {ESTADOS[detalle.estado]}</div>
+                <h3 style={{ margin: 0 }}>{detalle.cliente_nombre}</h3>
+              </div>
+              <button className="sold-x" onClick={() => { setDetalle(null); setCredito(null); }} aria-label="Cerrar">✕</button>
+            </div>
+            <div className="sold-body">
+              <p style={{ marginTop: 0 }}>
+                {detalle.linea_nombre} · {money(detalle.monto_solicitado)} · {detalle.cantidad_cuotas} cuotas
+                {detalle.margen_disponible != null && <> · Margen: <b>{money(detalle.margen_disponible)}</b></>}
+              </p>
+              {detalle.advertencias?.map((a: string, i: number) => (
+                <div className="aviso" key={i}>⚠ {a}</div>
+              ))}
+              {detalle.credito_id && (
+                <p className="badge-ok" style={{ marginTop: "0.6rem" }}>Crédito otorgado N° {detalle.credito_id}</p>
+              )}
+              {credito && (
+                <div style={{ marginTop: 14 }}>
+                  <h4 style={{ margin: "0 0 8px" }}>Crédito N° {credito.id} — plan de {credito.cantidad_cuotas} cuotas · total {money(credito.total_a_pagar)}</h4>
+                  <div style={{ overflowX: "auto" }}>
+                    <table>
+                      <thead>
+                        <tr><th>#</th><th>Vto</th><th>Saldo</th><th>Capital</th><th>Interés</th><th>IVA</th><th>Total</th></tr>
+                      </thead>
+                      <tbody>
+                        {credito.cuotas.map((c: any) => (
+                          <tr key={c.numero}>
+                            <td>{c.numero}</td><td>{c.fecha_vencimiento}</td>
+                            <td>{money(c.saldo_capital)}</td><td>{money(c.amortizacion)}</td>
+                            <td>{money(c.interes)}</td><td>{money(c.iva_interes)}</td>
+                            <td><b>{money(c.total)}</b></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               )}
             </div>
-          )}
-          {detalle.credito_id && (
-            <p className="badge-ok" style={{ marginTop: "0.6rem" }}>
-              Crédito otorgado N° {detalle.credito_id}
-            </p>
-          )}
-        </div>
-      )}
-
-      {credito && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>
-            Crédito N° {credito.id} — plan de {credito.cantidad_cuotas} cuotas ·
-            total {money(credito.total_a_pagar)}
-          </h3>
-          <div style={{ overflowX: "auto" }}>
-            <table>
-              <thead>
-                <tr><th>#</th><th>Vto</th><th>Saldo</th><th>Capital</th>
-                  <th>Interés</th><th>IVA</th><th>Total</th></tr>
-              </thead>
-              <tbody>
-                {credito.cuotas.map((c: any) => (
-                  <tr key={c.numero}>
-                    <td>{c.numero}</td><td>{c.fecha_vencimiento}</td>
-                    <td>{money(c.saldo_capital)}</td><td>{money(c.amortizacion)}</td>
-                    <td>{money(c.interes)}</td><td>{money(c.iva_interes)}</td>
-                    <td><b>{money(c.total)}</b></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="sold-mf">
+              <button className="btn-ghost" onClick={() => { setDetalle(null); setCredito(null); }}>Cerrar</button>
+              <div style={{ flex: 1 }} />
+              {detalle.estado === "I" && <>
+                {!detalle.puede_otorgarse && (
+                  <button onClick={() => otorgar(detalle.id, true)} style={{ background: "var(--alerta)" }}>Otorgar igual (forzar)</button>
+                )}
+                <button className="primary" onClick={() => otorgar(detalle.id)} disabled={!detalle.puede_otorgarse}>Otorgar crédito</button>
+              </>}
+            </div>
           </div>
+          <style>{`
+            .sold-ov { position:fixed; inset:0; background:rgba(16,24,40,.45); z-index:40; display:flex; align-items:center; justify-content:center; padding:16px; }
+            .sold-modal { width:min(820px,96vw); max-height:92vh; overflow:hidden; background:var(--surface); border:1px solid var(--border); border-radius:14px; box-shadow:0 24px 70px -20px rgba(16,32,64,.55); display:flex; flex-direction:column; }
+            .sold-mh { display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border); }
+            .sold-mh .sold-x { margin-left:auto; width:32px; height:32px; border-radius:8px; border:1px solid var(--border); background:var(--surface); cursor:pointer; color:var(--ink-soft); font-size:16px; }
+            .sold-body { padding:14px 18px; overflow-y:auto; }
+            .sold-mf { display:flex; gap:10px; align-items:center; padding:12px 18px; border-top:1px solid var(--border); background:var(--surface-2); }
+          `}</style>
         </div>
       )}
 

@@ -114,3 +114,112 @@ def rtf_a_texto(text: str) -> str:
     s = re.sub(r"[ \t]+\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
+
+
+def _esc_html(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def rtf_a_html(text: str) -> str:
+    """RTF → HTML preservando negrita, cursiva, subrayado y alineación por párrafo (para el editor
+    mini-Word y el export a Word). Los párrafos centrados y en negrita quedan como títulos naturales."""
+    if not text:
+        return ""
+    if "\\rtf" not in text[:20]:
+        # texto plano → párrafos (líneas en blanco separan; saltos simples con <br>)
+        return "".join(f"<p>{_esc_html(b).strip().replace(chr(10), '<br>')}</p>"
+                       for b in text.split("\n\n") if b.strip())
+
+    stack: list[tuple] = []
+    ignorable = False
+    ucskip = 1
+    curskip = 0
+    bold = italic = under = False
+    align = "left"
+    paras: list[tuple[str, list]] = []          # [(align, [(txt,b,i,u), ...])]
+    runs: list[tuple] = []
+    buf: list[str] = []
+
+    def flush_run():
+        nonlocal buf
+        if buf:
+            runs.append(("".join(buf), bold, italic, under))
+            buf = []
+
+    def flush_par():
+        nonlocal runs
+        flush_run()
+        if any(t.strip() for t, *_ in runs):
+            paras.append((align, runs))
+        runs = []
+
+    for m in _PATTERN.finditer(text):
+        word, arg, hexcode, char, brace, tchar = m.groups()
+        if brace:
+            if brace == "{":
+                stack.append((ucskip, ignorable, bold, italic, under, align))
+            elif brace == "}" and stack:
+                flush_run()
+                ucskip, ignorable, bold, italic, under, align = stack.pop()
+        elif char:
+            if char == "~" and not ignorable:
+                buf.append(" ")
+            elif char in "{}\\" and not ignorable:
+                buf.append(char)
+            elif char == "*":
+                ignorable = True
+        elif word:
+            if word in _DESTINATIONS:
+                ignorable = True
+            elif ignorable:
+                pass
+            elif word in ("par", "sect", "line"):
+                flush_par()
+            elif word == "pard":
+                flush_par(); align = "left"; flush_run(); bold = italic = under = False
+            elif word in ("qc", "qr", "qj", "ql"):
+                align = {"qc": "center", "qr": "right", "qj": "justify", "ql": "left"}[word]
+            elif word == "b":
+                flush_run(); bold = (arg != "0")
+            elif word == "i":
+                flush_run(); italic = (arg != "0")
+            elif word in ("ul", "ulnone"):
+                flush_run(); under = (word == "ul")
+            elif word == "uc":
+                ucskip = int(arg or 1)
+            elif word == "u":
+                c = int(arg)
+                if c < 0:
+                    c += 0x10000
+                buf.append(chr(c) if c <= 0x10FFFF else "?")
+                curskip = ucskip
+            elif word in _SPECIAL and _SPECIAL[word] not in ("\n", "\n\n"):
+                buf.append(_SPECIAL[word])
+        elif hexcode:
+            if not ignorable:
+                if curskip > 0:
+                    curskip -= 1
+                else:
+                    buf.append(bytes([int(hexcode, 16)]).decode("cp1252", "ignore"))
+        elif tchar:
+            if curskip > 0:
+                curskip -= 1
+            elif not ignorable:
+                buf.append(tchar)
+    flush_par()
+
+    html: list[str] = []
+    for al, rns in paras:
+        style = "" if al == "left" else f' style="text-align:{al}"'
+        inner = []
+        for txt, b, i, u in rns:
+            t = _esc_html(txt)
+            if not t:
+                continue
+            if b: t = f"<b>{t}</b>"
+            if i: t = f"<i>{t}</i>"
+            if u: t = f"<u>{t}</u>"
+            inner.append(t)
+        if inner:
+            html.append(f"<p{style}>{''.join(inner)}</p>")
+    return "".join(html)

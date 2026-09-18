@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import DataTable, { Col } from "../../components/DataTable";
+import RichText, { esHtml, plainAHtml, htmlTieneContenido } from "../../components/RichText";
 import { confirmar, avisar } from "../../ui/dialog";
 
 const LIMIT = 25;
@@ -13,7 +14,7 @@ const TIPO_DOC: Record<number, string> = { 0: "—", 1: "DNI", 2: "LC", 3: "LE",
 const TIPO_BENE: Record<number, string> = { 0: "—", 1: "Titular", 2: "Beneficiario", 3: "Apoderado" };
 
 type Bene = { tipo_doc: number; nro_doc: string; nombre: string; tipo_bene: number };
-type Modelo = { codigo: number; descripcion: string; tipo: string };
+type Modelo = { id: number; codigo: number; descripcion: string; tipo: string };
 
 export default function Resoluciones() {
   const [rows, setRows] = useState<any[]>([]);
@@ -27,6 +28,7 @@ export default function Resoluciones() {
 
   const [modelos, setModelos] = useState<Modelo[]>([]);
   const [editor, setEditor] = useState(false);          // modal de alta
+  const [editar, setEditar] = useState<any | null>(null);    // modal de edición (borrador)
   const [detalle, setDetalle] = useState<any | null>(null);  // modal ver
 
   async function cargar(off = offset, s = sort, o = order) {
@@ -53,14 +55,19 @@ export default function Resoluciones() {
         ? <span className="pill crit">Anulada</span>
         : <span className={`pill ${r.estado === "F" ? "ok" : "warn"}`}>{r.estado === "F" ? "Oficial" : "Borrador"}</span> },
   ];
+  const esBorrador = (r: any) => !r.anulada && r.estado !== "F" && !r.numero_real;
   const acciones = (r: any) => [
     { label: "Ver / beneficiarios", icon: "eye", onClick: () => verDetalle(r.id) },
-    ...(!r.numero_real ? [{ label: "Cargar N° Real", icon: "edit", onClick: () => cargarNumeroReal(r.id) }] : []),
+    ...(esBorrador(r) ? [{ label: "Editar", icon: "edit", onClick: () => abrirEditar(r.id) }] : []),
+    ...(!r.numero_real ? [{ label: "Cargar N° Real", icon: "check", onClick: () => cargarNumeroReal(r.id) }] : []),
     { label: "Descargar Word", icon: "copy", onClick: () => api.descargarResolucionWord(r.id, `${r.tipo}_${r.numero}_${r.anio}.docx`) },
   ];
 
   async function verDetalle(id: number) {
     try { setDetalle(await api.resolucion(id)); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); }
+  }
+  async function abrirEditar(id: number) {
+    try { setEditar(await api.resolucion(id)); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); }
   }
   async function cargarNumeroReal(id: number) {
     if (!(await confirmar({ titulo: "Cargar N° Real", confirmar: "Asignar", mensaje: "Se asignará el próximo N° Real oficial (por tipo y año) a esta resolución. ¿Confirmás?" }))) return;
@@ -97,8 +104,11 @@ export default function Resoluciones() {
       </div>
 
       {editor && <EditorResolucion modelos={modelos} onClose={() => setEditor(false)}
-                    onCreada={(r) => { setEditor(false); cargar(0); setDetalle(r); }} />}
+                    onGuardada={(r) => { setEditor(false); cargar(0); setDetalle(r); }} />}
+      {editar && <EditorResolucion modelos={modelos} inicial={editar} onClose={() => setEditar(null)}
+                    onGuardada={(r) => { setEditar(null); cargar(offset); setDetalle(r); }} />}
       {detalle && <DetalleResolucion r={detalle} onClose={() => setDetalle(null)}
+                    onEditar={esBorrador(detalle) ? () => { setDetalle(null); abrirEditar(detalle.id); } : undefined}
                     onNumeroReal={() => cargarNumeroReal(detalle.id)} />}
 
       <style>{`
@@ -116,6 +126,10 @@ export default function Resoluciones() {
         .rsl-fld input, .rsl-fld select, .rsl-fld textarea { margin-bottom:0; }
         .rsl-fld .ro { font-size:13px; color:var(--ink-faint); padding:8px 0; }
         .rsl-legal { width:100%; min-height:200px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; line-height:1.5; }
+        .rsl-legal-view { border:1px solid var(--border); border-radius:10px; padding:12px 14px; max-height:340px; overflow:auto; font-size:13.5px; line-height:1.55; background:var(--surface); }
+        .rsl-legal-view h1,.rsl-legal-view h2 { font-size:15px; text-align:center; margin:.4em 0; }
+        .rsl-legal-view h3,.rsl-legal-view h4 { font-size:13.5px; margin:.4em 0; }
+        .rsl-legal-view p { margin:.4em 0; text-align:justify; }
         .rsl-sect { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--brand-2); font-weight:700; margin:16px 0 8px; padding-bottom:6px; border-bottom:1px solid var(--border); }
         .rsl-ben { width:100%; border-collapse:collapse; font-size:13px; }
         .rsl-ben th, .rsl-ben td { padding:6px 8px; border-bottom:1px solid var(--border); text-align:left; }
@@ -129,28 +143,38 @@ export default function Resoluciones() {
   );
 }
 
-// ---- Editor de alta (parecido a la pantalla VFP) ----
-function EditorResolucion({ modelos, onClose, onCreada }: { modelos: Modelo[]; onClose: () => void; onCreada: (r: any) => void }) {
-  const [tipo, setTipo] = useState("RES");
-  const [fecha, setFecha] = useState(hoy());
-  const [modeloCod, setModeloCod] = useState("");
-  const [importe, setImporte] = useState("");
-  const [origen, setOrigen] = useState("");
-  const [texto, setTexto] = useState("");
-  const [bene, setBene] = useState<Bene[]>([]);
+// ---- Editor de alta / edición (parecido a la pantalla VFP). `inicial` = editar un borrador ----
+function EditorResolucion({ modelos, inicial, onClose, onGuardada }:
+  { modelos: Modelo[]; inicial?: any; onClose: () => void; onGuardada: (r: any) => void }) {
+  const edicion = !!inicial;
+  // El modelo se guarda por código en la resolución; acá se resuelve al id único (código repite entre tipos).
+  const modeloIdInicial = inicial?.modelo_codigo
+    ? String(modelos.find((m) => m.codigo === inicial.modelo_codigo
+        && (inicial.tipo === "DIS") === (m.tipo === "Disposición"))?.id || "")
+    : "";
+  const [tipo, setTipo] = useState(inicial?.tipo || "RES");
+  const [fecha, setFecha] = useState(inicial?.fecha || hoy());
+  const [modeloId, setModeloId] = useState(modeloIdInicial);   // id único del modelo elegido
+  const [importe, setImporte] = useState(Number(inicial?.importe) ? String(Number(inicial.importe)) : "");
+  const [origen, setOrigen] = useState(inicial?.origen || "");
+  const [texto, setTexto] = useState(inicial?.texto || "");    // HTML del editor mini-Word
+  const [bene, setBene] = useState<Bene[]>((inicial?.beneficiarios || []).map((b: any) =>
+    ({ tipo_doc: b.tipo_doc ?? 0, nro_doc: b.nro_doc || "", nombre: b.nombre || "", tipo_bene: b.tipo_bene ?? 0 })));
   const [guardando, setGuardando] = useState(false);
   const [err, setErr] = useState("");
 
   const modelosTipo = useMemo(() => modelos.filter((m) => (tipo === "DIS") === (m.tipo === "Disposición")), [modelos, tipo]);
-  const motivo = modelos.find((m) => String(m.codigo) === modeloCod)?.descripcion || "";
+  const motivo = modelos.find((m) => String(m.id) === modeloId)?.descripcion || (edicion ? inicial.motivo : "") || "";
 
-  async function elegirModelo(cod: string) {
-    setModeloCod(cod);
-    if (!cod) return;
-    // "Modelo a utilizar": carga el texto base si el cuerpo está vacío.
+  async function elegirModelo(id: string) {
+    setModeloId(id);
+    if (!id) return;
+    // "Modelo a utilizar": carga el texto base (plantilla) si el cuerpo está vacío.
     try {
-      const m = await api.modeloResolucion(Number(cod));
-      if (m.plantilla && !texto.trim()) setTexto(m.plantilla);
+      const m = await api.modeloResolucion(Number(id));
+      if (m.plantilla && !htmlTieneContenido(texto)) {
+        setTexto(esHtml(m.plantilla) ? m.plantilla : plainAHtml(m.plantilla));
+      }
     } catch { /* el modelo puede no tener plantilla */ }
   }
   const setB = (i: number, k: keyof Bene, v: any) => setBene((bs) => bs.map((b, idx) => idx === i ? { ...b, [k]: v } : b));
@@ -159,19 +183,21 @@ function EditorResolucion({ modelos, onClose, onCreada }: { modelos: Modelo[]; o
 
   const impInvalido = importe !== "" && !(Number(importe) >= 0);
   const beneInvalido = bene.some((b) => !b.nombre.trim());
-  const puede = !impInvalido && !beneInvalido && (!!modeloCod || !!texto.trim());
+  const puede = !impInvalido && !beneInvalido && (!!modeloId || htmlTieneContenido(texto));
 
   async function grabar() {
     setErr("");
     if (!puede) { setErr("Elegí un modelo o cargá el texto; revisá importe y que cada beneficiario tenga nombre."); return; }
     setGuardando(true);
+    const payload = {
+      tipo, fecha, modelo_id: modeloId ? Number(modeloId) : null,
+      importe: importe ? Number(importe) : 0, origen: origen.trim(),
+      texto: htmlTieneContenido(texto) ? texto : "",
+      beneficiarios: bene.map((b) => ({ ...b, nro_doc: b.nro_doc.replace(/\D/g, "") })),
+    };
     try {
-      const r = await api.crearResolucion({
-        tipo, fecha, modelo_codigo: modeloCod ? Number(modeloCod) : null,
-        importe: importe ? Number(importe) : 0, origen: origen.trim(), texto,
-        beneficiarios: bene.map((b) => ({ ...b, nro_doc: b.nro_doc.replace(/\D/g, "") })),
-      });
-      onCreada(r);
+      const r = edicion ? await api.editarResolucion(inicial.id, payload) : await api.crearResolucion(payload);
+      onGuardada(r);
     } catch (e: any) { setErr(e.message || String(e)); }
     finally { setGuardando(false); }
   }
@@ -180,21 +206,25 @@ function EditorResolucion({ modelos, onClose, onCreada }: { modelos: Modelo[]; o
     <div className="rsl-ov" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="rsl-modal">
         <div className="rsl-mh">
-          <div><div className="eyebrow">Nueva</div><h2>Resolución / Disposición</h2></div>
+          <div><div className="eyebrow">{edicion ? `Editar borrador · N° ${inicial.numero}/${inicial.anio}` : "Nueva"}</div>
+            <h2>Resolución / Disposición</h2></div>
           <button className="x" onClick={onClose} aria-label="Cerrar">✕</button>
         </div>
         <div className="rsl-body">
           <div className="rsl-grid">
             <div className="rsl-fld"><label>Tipo</label>
-              <select value={tipo} onChange={(e) => { setTipo(e.target.value); setModeloCod(""); }}>
-                <option value="RES">Resolución</option><option value="DIS">Disposición</option></select></div>
-            <div className="rsl-fld"><label>N° Correlativo</label><div className="ro">se asigna al grabar</div></div>
+              {edicion
+                ? <div className="ro">{TIPO_LBL[tipo] || tipo}</div>
+                : <select value={tipo} onChange={(e) => { setTipo(e.target.value); setModeloId(""); }}>
+                    <option value="RES">Resolución</option><option value="DIS">Disposición</option></select>}</div>
+            <div className="rsl-fld"><label>N° Correlativo</label>
+              <div className="ro">{edicion ? `${inicial.numero}/${inicial.anio}` : "se asigna al grabar"}</div></div>
             <div className="rsl-fld"><label>Fecha</label><input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} /></div>
             <div className="rsl-fld"><label>N° Real</label><div className="ro">se carga luego</div></div>
             <div className="rsl-fld col2"><label>Modelo a utilizar <span className="muted">(define el motivo)</span></label>
-              <select value={modeloCod} onChange={(e) => elegirModelo(e.target.value)}>
+              <select value={modeloId} onChange={(e) => elegirModelo(e.target.value)}>
                 <option value="">— elegí un modelo —</option>
-                {modelosTipo.map((m) => <option key={m.codigo} value={m.codigo}>{m.codigo} · {m.descripcion}</option>)}
+                {modelosTipo.map((m) => <option key={m.id} value={m.id}>{m.codigo} · {m.descripcion}</option>)}
               </select></div>
             <div className={`rsl-fld ${impInvalido ? "err" : ""}`}><label>Importe</label>
               <input className="num rsl-imp" inputMode="decimal" value={importe} placeholder="0,00"
@@ -205,8 +235,8 @@ function EditorResolucion({ modelos, onClose, onCreada }: { modelos: Modelo[]; o
           </div>
 
           <div className="rsl-sect">Texto del instrumento legal</div>
-          <textarea className="rsl-legal" value={texto} onChange={(e) => setTexto(e.target.value)}
-                    placeholder="Cuerpo de la resolución. Al elegir un modelo se carga su texto base." />
+          <RichText value={texto} onChange={setTexto}
+                    placeholder="Cuerpo de la resolución. Usá Título/Subtítulo, negrita, etc. Al elegir un modelo se carga su texto base." />
 
           <div className="rsl-sect" style={{ display: "flex", alignItems: "center" }}>Beneficiarios
             <span style={{ flex: 1 }} /><button type="button" className="btn sm" onClick={addB}>＋ Agregar</button></div>
@@ -235,7 +265,7 @@ function EditorResolucion({ modelos, onClose, onCreada }: { modelos: Modelo[]; o
         <div className="rsl-mf">
           <span style={{ flex: 1 }} />
           <button className="btn-ghost" onClick={onClose}>Cancelar</button>
-          <button disabled={guardando || !puede} onClick={grabar}>{guardando ? "Grabando…" : "Grabar"}</button>
+          <button disabled={guardando || !puede} onClick={grabar}>{guardando ? "Grabando…" : (edicion ? "Guardar cambios" : "Grabar")}</button>
         </div>
       </div>
     </div>
@@ -243,7 +273,7 @@ function EditorResolucion({ modelos, onClose, onCreada }: { modelos: Modelo[]; o
 }
 
 // ---- Detalle / ver (con beneficiarios y carga de N° Real) ----
-function DetalleResolucion({ r, onClose, onNumeroReal }: { r: any; onClose: () => void; onNumeroReal: () => void }) {
+function DetalleResolucion({ r, onClose, onNumeroReal, onEditar }: { r: any; onClose: () => void; onNumeroReal: () => void; onEditar?: () => void }) {
   return (
     <div className="rsl-ov" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="rsl-modal">
@@ -264,7 +294,10 @@ function DetalleResolucion({ r, onClose, onNumeroReal }: { r: any; onClose: () =
             {r.origen && <div className="rsl-fld col4"><label>Exp./Nota origen</label><div className="ro">{r.origen}</div></div>}
           </div>
           <div className="rsl-sect">Texto del instrumento legal</div>
-          <textarea className="rsl-legal" readOnly value={r.texto || "(sin texto)"} />
+          {!r.texto ? <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>(sin texto)</p>
+            : esHtml(r.texto)
+              ? <div className="rsl-legal-view" dangerouslySetInnerHTML={{ __html: r.texto }} />
+              : <div className="rsl-legal-view" style={{ whiteSpace: "pre-wrap" }}>{r.texto}</div>}
           <div className="rsl-sect">Beneficiarios ({(r.beneficiarios || []).length})</div>
           {(r.beneficiarios || []).length === 0 ? <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>Sin beneficiarios.</p> : (
             <table className="rsl-ben">
@@ -276,6 +309,7 @@ function DetalleResolucion({ r, onClose, onNumeroReal }: { r: any; onClose: () =
           )}
         </div>
         <div className="rsl-mf">
+          {onEditar && <button className="btn-ghost" onClick={onEditar}>Editar</button>}
           {!r.numero_real && <button className="btn-ghost" onClick={onNumeroReal}>Cargar N° Real</button>}
           <span style={{ flex: 1 }} />
           <button className="btn-ghost" onClick={() => api.descargarResolucionWord(r.id, `${r.tipo}_${r.numero}_${r.anio}.docx`)}>Descargar Word</button>

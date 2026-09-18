@@ -107,6 +107,7 @@ class PPProducto(Base):
     codigo: Mapped[str] = mapped_column(String(60), unique=True)
     nombre: Mapped[str] = mapped_column(String(160))
     descripcion: Mapped[str] = mapped_column(Text, default="")
+    copiado_de: Mapped[str | None] = mapped_column(String(36), nullable=True)  # H-190: código del préstamo del que se duplicó (trazabilidad + prompt de retirar-original)
     creado_en: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     versiones: Mapped[list["PPVersion"]] = relationship(
         back_populates="producto", cascade="all, delete-orphan")

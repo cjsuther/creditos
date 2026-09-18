@@ -4,6 +4,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.codigos import codigo_cliente, codigo_cliente_provisorio
 from app.core.database import get_db
 from app.core.idempotency import con_idempotencia
 from app.core.pagination import paginar
@@ -84,7 +85,12 @@ def crear(data: schemas.ClienteCreate, db: Session = Depends(get_db),
         # altas concurrentes con el mismo CUIL no pueden crear un duplicado; la 2ª cae en IntegrityError → 409.
         if db.query(models.Cliente).filter_by(cuil=data.cuil).first():
             raise HTTPException(409, "Ya existe un cliente con ese CUIL")
-        c = models.Cliente(**_truncar(data.model_dump()))
+        datos = _truncar(data.model_dump())
+        # H-169: el id_cliente NO es el CUIL ni un N° de solicitud: se AUTOGENERA del PK (surrogate).
+        # Sólo se respeta uno explícito si viene de la migración/ETL (código legacy CIDCLIENTE).
+        manual = (datos.get("id_cliente") or "").strip()
+        datos["id_cliente"] = manual or codigo_cliente_provisorio()
+        c = models.Cliente(**datos)
         db.add(c)
         try:
             db.flush()
@@ -93,6 +99,9 @@ def crear(data: schemas.ClienteCreate, db: Session = Depends(get_db),
             if db.query(models.Cliente).filter_by(cuil=data.cuil).first():
                 raise HTTPException(409, "Ya existe un cliente con ese CUIL")
             raise HTTPException(409, "Ya existe un cliente con ese código (id_cliente)")
+        if not manual:
+            c.id_cliente = codigo_cliente(c.id)   # CL-000123 a partir del PK ya asignado
+            db.flush()
         db.commit()
         return {"id": c.id}
 

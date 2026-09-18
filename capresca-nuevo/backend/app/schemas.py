@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 T = TypeVar("T")
 
@@ -507,6 +507,7 @@ class AsientoLineaOut(BaseModel):
     cuenta_nombre: str
     debe: Decimal
     haber: Decimal
+    centro_codigo: str = ""
 
 
 class AsientoOut(BaseModel):
@@ -516,7 +517,88 @@ class AsientoOut(BaseModel):
     concepto: str
     origen: str
     ref_id: int | None
+    numero: int | None = None
+    reversado: bool = False
+    reversa_de: int | None = None
+    usuario: str = ""
+    estado: str = "publicado"
+    diario_codigo: str = ""
     lineas: list[AsientoLineaOut]
+
+
+class AsientoLineaIn(BaseModel):
+    cuenta_codigo: str = ""
+    debe: Decimal = Decimal("0")
+    haber: Decimal = Decimal("0")
+    centro_codigo: str = ""
+
+
+class AsientoManualIn(BaseModel):
+    fecha: date | None = None
+    concepto: str = Field(min_length=1, max_length=120)
+    diario_codigo: str = "VAR"
+    lineas: list[AsientoLineaIn] = []
+
+
+class ImputacionIn(BaseModel):
+    cuenta_codigo: str = Field(min_length=1, max_length=12)
+
+
+class EjercicioIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=40)
+    fecha_desde: date
+    fecha_hasta: date
+
+
+class CentroCostoIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+    nombre: str = Field(min_length=1, max_length=60)
+    activo: bool = True
+
+
+# ---------- Plan de cuentas ----------
+class EntidadRelacionada(BaseModel):
+    tipo: str = ""
+    entidad: str = ""
+
+
+class CuentaContableIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=12)
+    nombre: str = Field(min_length=1, max_length=80)
+    tipo: str = "activo"   # rubro: activo | pasivo | patrimonio | ingreso | egreso
+    descripcion: str = ""
+    alias: str = ""
+    moneda: str = "ARS"
+    clasificacion: str = "Sin clasificar"   # Caja | Banco | Cliente | Proveedor | Impuesto | Resultado…
+    saldo_normal: str = "deudor"            # deudor | acreedor
+    imputable: bool = True
+    manual: bool = False
+    entidades: list[EntidadRelacionada] = []
+
+    @field_validator("codigo", "nombre")
+    @classmethod
+    def _no_vacio(cls, v: str) -> str:
+        if not (v or "").strip():
+            raise ValueError("Campo obligatorio")
+        return v.strip()
+
+
+class CuentaContableOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    codigo: str
+    nombre: str
+    tipo: str
+    descripcion: str = ""
+    alias: str = ""
+    moneda: str = "ARS"
+    clasificacion: str = "Sin clasificar"
+    saldo_normal: str = "deudor"
+    imputable: bool = True
+    manual: bool = False
+    entidades: list[EntidadRelacionada] = []
+    en_uso: bool = False   # tiene asientos que la referencian (no se puede borrar)
+    base: bool = False     # forma parte de la plantilla base (usada por el motor de asientos)
 
 
 # ---------- Cierre de caja ----------
@@ -1069,6 +1151,7 @@ class ParametroUpsert(BaseModel):
     clave: str
     valor: str
     descripcion: str = ""
+    ambito: str = "general"   # general|creditos|contabilidad (H-197)
 
 
 class ParametroOut(ParametroUpsert):
@@ -1131,6 +1214,20 @@ class CambioClave(BaseModel):
 
 
 # ---------- Despacho ----------
+class ModeloResolucionIn(BaseModel):
+    descripcion: str = Field(min_length=1)  # obligatoria; se rechaza si queda vacía al recortar (validator)
+    tipo: str = "RES"            # RES / DIS
+    plantilla: str = ""          # HTML del editor mini-Word (texto base)
+    seguros: bool = False
+
+    @field_validator("descripcion")
+    @classmethod
+    def _desc_no_vacia(cls, v: str) -> str:
+        if not (v or "").strip():
+            raise ValueError("La descripción es obligatoria")
+        return v
+
+
 class BeneficiarioIn(BaseModel):
     tipo_doc: int = 0
     nro_doc: str = ""
@@ -1153,9 +1250,21 @@ class ResolucionCreate(BaseModel):
     texto: str = ""
     organo: str = ""
     fecha: date | None = None
-    modelo_codigo: int | None = None   # "Modelo a utilizar" (COD_MOD); su descripción es el motivo
+    modelo_id: int | None = None       # "Modelo a utilizar" (id único; su descripción es el motivo)
+    modelo_codigo: int | None = None   # compat: COD_MOD (si no viene modelo_id)
     importe: Decimal = Field(default=Decimal("0"), ge=0)
     origen: str = ""                   # Exp./Nota que origina el instrumento legal
+    beneficiarios: list[BeneficiarioIn] = []
+
+
+class ResolucionUpdate(BaseModel):
+    """Edición de un BORRADOR (no cambia tipo/número/año). Sólo mientras no sea oficial."""
+    fecha: date | None = None
+    modelo_id: int | None = None
+    modelo_codigo: int | None = None
+    texto: str = ""
+    importe: Decimal = Field(default=Decimal("0"), ge=0)
+    origen: str = ""
     beneficiarios: list[BeneficiarioIn] = []
 
 

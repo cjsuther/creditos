@@ -34,8 +34,15 @@ async def lifespan(app: FastAPI):
         seed_perfiles(db)
         seed_productos(db)
         _seed_feriados(db)
+        from app.services.contabilidad import seed_imputaciones, seed_diarios, seed_centros, seed_parametros_contables
+        seed_imputaciones(db)
+        seed_diarios(db)
+        seed_centros(db)
+        seed_parametros_contables(db)
         from app.services.workflow import seed_workflow
         seed_workflow(db)
+        from app.api.productos import seed_canales_parametros
+        seed_canales_parametros(db)
     # Los asientos migrados (ETL) traen ids explícitos: resincronizamos la secuencia para que
     # los asientos generados por la app (originación/servicing de contratos) no colisionen.
     _resync_secuencia_asientos()
@@ -88,6 +95,45 @@ def _migrar_iam() -> None:
             conn.execute(text(f"ALTER TABLE resoluciones ADD COLUMN IF NOT EXISTS {col} {ddl}"))
         conn.execute(text("ALTER TABLE modelos_resolucion ADD COLUMN IF NOT EXISTS plantilla TEXT DEFAULT ''"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_resoluciones_numero_real ON resoluciones (numero_real)"))
+        # Plan de cuentas: campos de la pantalla moderna (H-174). Idempotente.
+        for col, ddl in (("descripcion", "TEXT DEFAULT ''"), ("alias", "VARCHAR(40) DEFAULT ''"),
+                         ("moneda", "VARCHAR(3) DEFAULT 'ARS'"), ("clasificacion", "VARCHAR(30) DEFAULT 'Sin clasificar'"),
+                         ("saldo_normal", "VARCHAR(10) DEFAULT 'deudor'"), ("imputable", "BOOLEAN DEFAULT TRUE"),
+                         ("manual", "BOOLEAN DEFAULT FALSE"), ("entidades", "JSONB DEFAULT '[]'::jsonb")):
+            conn.execute(text(f"ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS {col} {ddl}"))
+        # Asientos manuales (H-176): correlativo, reversa y auditoría. Idempotente.
+        for col, ddl in (("numero", "INTEGER"), ("reversado", "BOOLEAN DEFAULT FALSE"),
+                         ("reversa_de", "INTEGER"), ("usuario", "VARCHAR(30) DEFAULT ''"),
+                         ("estado", "VARCHAR(12) DEFAULT 'publicado'"), ("diario_codigo", "VARCHAR(12) DEFAULT ''")):
+            conn.execute(text(f"ALTER TABLE asientos ADD COLUMN IF NOT EXISTS {col} {ddl}"))
+        conn.execute(text("ALTER TABLE asientos_lineas ADD COLUMN IF NOT EXISTS centro_codigo VARCHAR(12) DEFAULT ''"))
+        # H-188: contabilidad por EMPRESA (multi-plan). Se agrega empresa_id a cuentas/asientos/ejercicios,
+        # se garantiza una empresa predeterminada, se backfillean los datos existentes a ella, y el código
+        # de cuenta pasa a ser único POR empresa (antes único global).
+        conn.execute(text("ALTER TABLE empresas ADD COLUMN IF NOT EXISTS cuit VARCHAR(13) DEFAULT ''"))
+        emp = conn.execute(text("SELECT id FROM empresas WHERE predeterminada = TRUE ORDER BY id LIMIT 1")).first()
+        if not emp:
+            emp = conn.execute(text("SELECT id FROM empresas ORDER BY id LIMIT 1")).first()
+            if emp:
+                conn.execute(text("UPDATE empresas SET predeterminada = TRUE WHERE id = :i"), {"i": emp[0]})
+            else:
+                emp = conn.execute(text("INSERT INTO empresas (codigo, nombre, cuit, predeterminada, activa, creada_en) "
+                                        "VALUES ('GRAL', 'Ca.Pre.S.Ca. (general)', '', TRUE, TRUE, now()) RETURNING id")).first()
+        emp_id = emp[0]
+        for tabla in ("cuentas_contables", "asientos", "ejercicios_contables"):
+            conn.execute(text(f"ALTER TABLE {tabla} ADD COLUMN IF NOT EXISTS empresa_id INTEGER REFERENCES empresas(id)"))
+            conn.execute(text(f"UPDATE {tabla} SET empresa_id = :i WHERE empresa_id IS NULL"), {"i": emp_id})
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{tabla}_empresa ON {tabla} (empresa_id)"))
+        # código de cuenta único POR empresa: se baja la unique global y se sube la compuesta.
+        conn.execute(text("ALTER TABLE cuentas_contables DROP CONSTRAINT IF EXISTS cuentas_contables_codigo_key"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuenta_empresa_codigo ON cuentas_contables (empresa_id, codigo)"))
+        # H-190: trazabilidad de "préstamo duplicado" (de qué producto salió la copia).
+        conn.execute(text("ALTER TABLE pp_producto ADD COLUMN IF NOT EXISTS copiado_de VARCHAR(36)"))
+        # H-197: los parámetros se separan por ÁMBITO (general|creditos|contabilidad). Backfill de los actuales.
+        conn.execute(text("ALTER TABLE parametros ADD COLUMN IF NOT EXISTS ambito VARCHAR(20) DEFAULT 'general'"))
+        conn.execute(text("UPDATE parametros SET ambito='creditos' WHERE clave IN ('CANALES','CANAL_PORTAL','CANAL_BACKOFFICE','DECIMALES_CALCULO','DECIMALES_MOSTRAR')"))
+        conn.execute(text("UPDATE parametros SET ambito='contabilidad' WHERE clave IN ('CUENTAS_EFECTIVO')"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_parametros_ambito ON parametros (ambito)"))
 
 
 def _seed_feriados(db) -> None:

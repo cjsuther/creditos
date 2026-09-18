@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import RowMenu from "../../components/RowMenu";
+import DataTable, { Col } from "../../components/DataTable";
 import { api } from "../../api";
 import { useNivelActual } from "../../permisos";
-import { confirmar, avisar } from "../../ui/dialog";
+import { confirmar, avisar, pedirTexto } from "../../ui/dialog";
 
 // Configurar Créditos — Product Builder estilo Temenos AA. Diseño guiado por componentes
 // (Property Classes) con editores por componente, agregar/quitar, prueba en vivo opcional
@@ -28,6 +29,7 @@ type Producto = {
   vigentePortal?: number | null;   // versión publicada y vigente HOY que se ofrece en el portal (o null)
   componentes: Comp[]; enviadoPor?: string | null; aprobadoPor?: string | null; publicadoPor?: string | null;
   padre?: { id: string; codigo: string; nombre: string } | null; cfgHeredada?: boolean;
+  copiadoDe?: { id: string; codigo: string; nombre: string; publicado: boolean } | null;   // H-190: origen de la copia
 };
 type Permisos = { edita: boolean; aprueba: boolean };
 
@@ -220,6 +222,10 @@ export default function ConfigurarCreditos() {
   const [activoId, setActivoId] = useState<string | null>(null);
   const [nuevaVerDe, setNuevaVerDe] = useState<number | null>(null);
   const [filtro, setFiltro] = useState<Estado | "TODOS">("TODOS");
+  const [catVista, setCatVista] = useState<"tarjetas" | "lista">(() => {
+    try { return (localStorage.getItem("cfgc_vista") as any) || "tarjetas"; } catch { return "tarjetas"; }
+  });
+  const cambiarVista = (v: "tarjetas" | "lista") => { setCatVista(v); try { localStorage.setItem("cfgc_vista", v); } catch { /* ignore */ } };
   const [monto, setMonto] = useState(1200000);
   const [plazo, setPlazo] = useState(24);
   const [sel, setSel] = useState("TERM_AMOUNT");
@@ -249,6 +255,9 @@ export default function ConfigurarCreditos() {
   // maestros de referencia (biblioteca de condiciones)
   const [impuestos, setImpuestos] = useState<any[]>([]);
   const [indices, setIndices] = useState<any[]>([]);
+  // catálogo de segmentos/canales (configurable en Parámetros — H-185); los const son sólo el fallback.
+  const [catSegmentos, setCatSegmentos] = useState<string[]>(SEGMENTOS);
+  const [catCanales, setCatCanales] = useState<string[]>(CANALES);
 
   useEffect(() => {
     api.ppCatalogo().then((d) => {
@@ -261,6 +270,7 @@ export default function ConfigurarCreditos() {
     api.ppFamilias().then((d) => setFamilias(d.items)).catch(() => {});
     api.impuestos("activos").then((d) => setImpuestos(d.items)).catch(() => {});
     api.indices().then((d) => setIndices(d.items)).catch(() => {});
+    api.ctoSegmentos().then((d: any) => { if (Array.isArray(d?.segmentos)) setCatSegmentos(d.segmentos); if (Array.isArray(d?.canales)) setCatCanales(d.canales); }).catch(() => {});
   }, []);
 
   const activo = productos.find((p) => p.id === activoId) || null;
@@ -289,10 +299,6 @@ export default function ConfigurarCreditos() {
       const p = await api.ppCrear(base); setNuevoOpen(false); upsert(p); abrir(p);
     } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); }
   }
-  async function modificar(p: Producto) {
-    if (p.estado === "PUBLICADO" || p.estado === "RETIRADO") { try { const up = await api.ppNuevaVersion(p.id); upsert(up); abrir(up, up.derivadaDe ?? p.version); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
-    else abrir(p);
-  }
   async function retirar(p: Producto) { if (!(await confirmar({ titulo: "Retirar línea", danger: true, mensaje: `Retirar "${p.nombre}".\n\nDeja de ofrecerse a clientes nuevos. Los contratos ya originados NO se afectan (conservan su snapshot).\n\n¿Confirmás?` }))) return; try { upsert(await api.ppEstado(p.id, "retirar")); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
   async function reactivar(p: Producto) { try { upsert(await api.ppEstado(p.id, "reactivar")); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
   async function borrar(p: Producto) {
@@ -302,9 +308,36 @@ export default function ConfigurarCreditos() {
     catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); }
   }
   async function guardarBorrador() { if (!activo) return; try { upsert(await api.ppGuardarConfig(activo.id, payload(activo))); avisar("Borrador guardado"); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
-  async function enviarRevision() { if (!activo) return; try { await api.ppGuardarConfig(activo.id, payload(activo)); upsert(await api.ppEstado(activo.id, "revisar")); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
   async function publicar() { if (!activo) return; try { upsert(await api.ppEstado(activo.id, "publicar")); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
   async function aprobar() { if (!activo) return; try { upsert(await api.ppEstado(activo.id, "aprobar")); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
+  // H-190: DUPLICAR = crear un préstamo NUEVO e independiente (copia de la config), con su propio código y ciclo.
+  async function duplicar(p: Producto) {
+    const nombre = await pedirTexto({ mensaje: "Nombre del préstamo nuevo (copia independiente):", valor: `${p.nombre} — copia`, requerido: true });
+    if (!nombre) return;
+    try {
+      const np = await api.ppCrear({ copiar_de: p.id, nombre });
+      upsert(np); abrir(np);
+      avisar({ tipo: "ok", mensaje: `Se creó "${nombre}" como préstamo independiente. Editalo y publicalo.` });
+    } catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
+  }
+  // H-190: PUBLICAR en un paso (revisar→aprobar→publicar si el cuatro-ojos está apagado). Si es copia de un
+  // préstamo publicado, ofrece retirar el original para no ofrecer los dos a la vez.
+  async function publicarCambios() {
+    if (!activo) return;
+    try {
+      if (activo.estado === "BORRADOR") await api.ppGuardarConfig(activo.id, payload(activo));
+      const r = await api.ppPublicarDirecto(activo.id);
+      if (r.producto) upsert(r.producto);
+      if (r.needs_approval) { avisar({ tipo: "ok", mensaje: "Enviado a revisión: requiere la aprobación de otra persona (cuatro-ojos)." }); return; }
+      const orig = activo.copiadoDe;
+      if (orig && orig.publicado) {
+        if (await confirmar({ titulo: "¿Retirar el original?", mensaje: `Publicaste "${activo.nombre}".\n\nEs una copia de "${orig.nombre}", que sigue publicado. ¿Retirás el original para no ofrecer los dos a la vez?\n\n(Los contratos ya originados no se tocan.)` })) {
+          try { await api.ppEstado(orig.id, "retirar"); const d = await api.ppCatalogo(); setProductos(d.items); avisar({ tipo: "ok", mensaje: `Publicado. Se retiró "${orig.nombre}".` }); }
+          catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); }
+        } else { avisar({ tipo: "ok", mensaje: "Publicado. Los dos préstamos quedan ofreciéndose." }); }
+      } else { avisar({ tipo: "ok", mensaje: "Préstamo publicado." }); }
+    } catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
+  }
   async function rechazar() { if (!activo) return; try { upsert(await api.ppEstado(activo.id, "rechazar")); } catch (e: any) { avisar({ tipo: "error", mensaje: e.message }); } }
 
   async function abrirInspector() { setInspOpen(true); if (activo) api.ppRaw(activo.id).then(setRaw).catch(() => {}); if (!modelo) api.ppModelo().then(setModelo).catch(() => {}); }
@@ -321,9 +354,9 @@ export default function ConfigurarCreditos() {
 
   function accionesCard(p: Producto) {
     return [
-      { label: p.version > 1 || p.estado !== "BORRADOR" ? "Editar (nueva versión)" : "Editar", icon: "edit", onClick: () => modificar(p), hidden: !(permisos.edita && !soloLectura) },
+      { label: "Editar", icon: "edit", onClick: () => abrir(p), hidden: !(permisos.edita && !soloLectura) || p.estado !== "BORRADOR" },
       { label: "Abrir", icon: "eye", onClick: () => abrir(p) },
-      { label: "Duplicar como nueva", icon: "copy", onClick: () => { setNuevo({ nombre: `${p.nombre} (copia)`, familia_id: "", copiar_de: p.id, heredar: false }); setNuevoOpen(true); }, hidden: !(permisos.edita && !soloLectura) },
+      { label: "⧉ Duplicar (préstamo nuevo)", icon: "copy", onClick: () => duplicar(p), hidden: !(permisos.edita && !soloLectura) },
       { label: "Crear derivado (hereda)", icon: "git-branch", onClick: () => { setNuevo({ nombre: `${p.nombre} (derivado)`, familia_id: "", copiar_de: p.id, heredar: true }); setNuevoOpen(true); }, hidden: !(permisos.edita && !soloLectura) },
       { label: "Retirar línea", icon: "ban", danger: true, onClick: () => retirar(p), hidden: !permisos.aprueba || p.estado !== "PUBLICADO" },
       { label: "Reactivar línea", icon: "rotate-ccw", onClick: () => reactivar(p), hidden: !permisos.aprueba || p.estado !== "RETIRADO" },
@@ -404,10 +437,33 @@ export default function ConfigurarCreditos() {
   const guiaIdx = comp ? activeComps.findIndex((c) => c.codigo === sel) : -1;
   const siguiente = guiaIdx >= 0 && guiaIdx < activeComps.length - 1 ? activeComps[guiaIdx + 1].codigo : null;
   const editable = activo && activo.estado === "BORRADOR" && (permisos.edita && !soloLectura);
+  // La DISPONIBILIDAD (canales/segmentos) es metadata de distribución, no términos financieros: se puede
+  // editar aunque la versión esté publicada (H-189), sin crear versión nueva.
+  const editableDisp = !!activo && permisos.edita && !soloLectura;
+  async function guardarDisponibilidad() {
+    if (!activo || !comp) return;
+    try {
+      upsert(await api.editarDisponibilidad(activo.id, { activo: true, ...comp.config }));
+      avisar({ tipo: "ok", mensaje: "Disponibilidad guardada (canales/segmentos)." });
+    } catch (e: any) { avisar({ tipo: "error", mensaje: e.message || String(e) }); }
+  }
 
   // ============ CATÁLOGO ============
   if (vista === "catalogo" || !activo) {
     const lista = productos.filter((p) => filtro === "TODOS" || p.estado === filtro);
+    const colsCat: Col[] = [
+      { key: "nombre", label: "Línea", sortable: true, render: (p: any) => (
+          <div><b>{p.nombre}</b><div className="code" style={{ fontSize: 11, color: "var(--ink-faint)", fontFamily: "var(--mono, monospace)" }}>{p.codigo}</div></div>) },
+      { key: "estado", label: "Estado", sortable: true, render: (p: any) => (
+          <span className="cfgc-liststate">
+            <span className={`pill ${ESTADO_CLS[p.estado as Estado]}`}>{ESTADO_LABEL[p.estado as Estado].toUpperCase()}</span>
+            {p.vigentePortal == null && p.estado !== "RETIRADO" && <span className="pill" title="No se ofrece en el portal">no ofrecido</span>}
+          </span>) },
+      { key: "sistema", label: "Sistema", sortable: true, render: (p: any) => p.cfg.sistema },
+      { key: "tna", label: "TNA", align: "right", sortable: true, sortValue: (p: any) => p.cfg.tna, render: (p: any) => <span className="num">{p.cfg.tna}%</span> },
+      { key: "monto", label: "Monto", align: "right", render: (p: any) => <span className="num">{money(p.cfg.montoMin)}–{money(p.cfg.montoMax)}</span> },
+      { key: "plazo", label: "Plazo", align: "right", render: (p: any) => <span className="num">{p.cfg.plazoMin}–{p.cfg.plazoMax}</span> },
+    ];
     return (
       <div className="cfgc">
         <div className="cfgc-cathead">
@@ -423,9 +479,21 @@ export default function ConfigurarCreditos() {
             <option value="APROBADO">Aprobado</option><option value="PUBLICADO">Publicado</option><option value="RETIRADO">Retirado</option>
           </select>
           <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-faint)" }}>{lista.length} de {productos.length} líneas</span>
+          <div className="cfgc-vistas" role="group" aria-label="Vista">
+            <button className={catVista === "tarjetas" ? "on" : ""} title="Vista en tarjetas" onClick={() => cambiarVista("tarjetas")}>▦ Tarjetas</button>
+            <button className={catVista === "lista" ? "on" : ""} title="Vista en línea (lista)" onClick={() => cambiarVista("lista")}>≣ En línea</button>
+          </div>
         </div>
         {cargando && <p className="muted">Cargando catálogo…</p>}
         {!cargando && !productos.length && <p className="muted">Sin líneas. Creá la primera con “＋ Nueva línea”.</p>}
+        {catVista === "lista" && productos.length > 0 && (
+          <div className="card" style={{ padding: "4px 14px 14px" }}>
+            <DataTable columns={colsCat} rows={lista} rowKey={(p: any) => p.id} actions={accionesCard}
+              clientSort pageSize={50} defaultSort="nombre" emptyText="Sin líneas en este filtro"
+              rowStyle={(p: any) => p.estado === "RETIRADO" ? { opacity: .6 } : undefined} />
+          </div>
+        )}
+        {catVista === "tarjetas" && (
         <div className="cfgc-cat">
           {lista.map((p) => (
             <div className={`cfgc-pcard ${p.estado === "RETIRADO" ? "ret" : ""}`} key={p.id}>
@@ -433,10 +501,6 @@ export default function ConfigurarCreditos() {
                 <div style={{ flex: 1, minWidth: 0 }}><h3>{p.nombre}</h3><div className="code">{p.codigo} · v{p.version}</div></div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
                   <span className={`pill ${ESTADO_CLS[p.estado]}`}>{ESTADO_LABEL[p.estado].toUpperCase()}</span>
-                  {p.vigentePortal != null && p.vigentePortal !== p.version && (
-                    <span className="pill ok" title={`En el portal del ciudadano se ofrece la v${p.vigentePortal} (publicada y vigente). Esta versión (v${p.version}) todavía no reemplaza a la que está en producción.`}>
-                      🌐 portal: v{p.vigentePortal}</span>
-                  )}
                   {p.vigentePortal == null && p.estado !== "RETIRADO" && (
                     <span className="pill" title="Ninguna versión publicada y vigente: este producto NO se ofrece en el portal del ciudadano.">no ofrecido</span>
                   )}
@@ -452,12 +516,13 @@ export default function ConfigurarCreditos() {
               <div className="foot"><span className="sp" />
                 <button className="btn sm" onClick={() => abrir(p)}>Abrir</button>
                 {p.estado === "BORRADOR" && (permisos.edita && !soloLectura) && <button className="btn sm primary" onClick={() => abrir(p)}>Continuar edición</button>}
-                {p.estado === "PUBLICADO" && (permisos.edita && !soloLectura) && <button className="btn sm primary" onClick={() => modificar(p)}>Nueva versión</button>}
+                {p.estado === "PUBLICADO" && (permisos.edita && !soloLectura) && <button className="btn sm primary" title="Crear un préstamo nuevo e independiente, copia de éste" onClick={() => duplicar(p)}>⧉ Duplicar</button>}
                 {p.estado === "RETIRADO" && permisos.aprueba && <button className="btn sm" onClick={() => reactivar(p)}>Reactivar</button>}
               </div>
             </div>
           ))}
         </div>
+        )}
 
         {nuevoOpen && (
           <div className="cfgc-scrim" onClick={() => setNuevoOpen(false)}>
@@ -516,17 +581,22 @@ export default function ConfigurarCreditos() {
             <button className="btn ghost" onClick={abrirComparar}>⇄ Comparar</button>
             <button className="btn ghost" onClick={abrirInspector}>🔍 Datos</button>
             {activo.estado === "BORRADOR" && <>
-              <button className="btn" disabled={!(permisos.edita && !soloLectura)} onClick={guardarBorrador}>Guardar borrador</button>
-              <button className="btn primary" disabled={!(permisos.edita && !soloLectura)} onClick={enviarRevision}>Enviar a revisión</button>
+              <button className="btn" disabled={!(permisos.edita && !soloLectura)} onClick={guardarBorrador}>Guardar y seguir después</button>
+              <button className="btn" disabled={!(permisos.edita && !soloLectura)} onClick={() => borrar(activo)}>Descartar</button>
+              <button className="btn primary" disabled={!(permisos.edita && !soloLectura) || errs > 0}
+                title={errs ? "Resolvé las validaciones antes de publicar" : "Publicar el préstamo (queda vigente)"} onClick={publicarCambios}>Publicar</button>
             </>}
             {activo.estado === "EN_REVISION" && <>
               <button className="btn" disabled={!permisos.aprueba} onClick={rechazar}>Rechazar</button>
               <button className="btn primary" disabled={!permisos.aprueba || activo.enviadoPor === usuario}
                 title={activo.enviadoPor === usuario ? "Separación de funciones: no podés aprobar lo que vos enviaste" : "Aprobar"} onClick={aprobar}>Aprobar</button>
             </>}
-            {(activo.estado === "APROBADO" || activo.estado === "PUBLICADO") && (
-              <button className="btn primary" disabled={!permisos.aprueba || errs > 0 || activo.estado === "PUBLICADO"}
-                title={errs ? "Resolvé las validaciones" : "Publicar versión"} onClick={publicar}>{activo.estado === "PUBLICADO" ? "Publicada" : "Publicar versión"}</button>
+            {activo.estado === "APROBADO" && (
+              <button className="btn primary" disabled={!permisos.aprueba || errs > 0}
+                title={errs ? "Resolvé las validaciones" : "Publicar"} onClick={publicar}>Publicar</button>
+            )}
+            {activo.estado === "PUBLICADO" && (permisos.edita && !soloLectura) && (
+              <button className="btn primary" title="Crear un préstamo nuevo e independiente, copia de éste" onClick={() => duplicar(activo)}>⧉ Duplicar</button>
             )}
           </div>
         </div>
@@ -601,7 +671,7 @@ export default function ConfigurarCreditos() {
               <div style={{ textAlign: "center", padding: "40px 10px" }}>
                 <div style={{ fontSize: 34, marginBottom: 8 }}>{ICONS[comp.codigo]}</div>
                 <p className="muted" style={{ marginBottom: 14 }}>Este componente no está agregado a la línea.</p>
-                <button className="btn primary" disabled={!editable} onClick={() => toggleComp(comp.codigo, true)}>＋ Agregar “{comp.nombre}”</button>
+                <button className="btn primary" disabled={comp.codigo === "AVAILABILITY" ? !editableDisp : !editable} onClick={() => toggleComp(comp.codigo, true)}>＋ Agregar “{comp.nombre}”</button>
               </div>
             ) : comp && (<>
               {compErrores[comp.codigo]?.length > 0 && (
@@ -670,20 +740,26 @@ export default function ConfigurarCreditos() {
                 return (<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                   <div>
                     <span className="lbl" style={{ display: "block", marginBottom: 6 }}>Segmentos habilitados <small className="muted">(vacío = todos)</small></span>
-                    <div className="cfgc-chips">{SEGMENTOS.map((s) => <button key={s} type="button" disabled={!editable} className={`cfgc-chip ${arr("segmentos").includes(s) ? "on" : ""}`} onClick={() => toggle("segmentos", s)}>{s.replace(/_/g, " ")}</button>)}</div>
+                    <div className="cfgc-chips">{catSegmentos.map((s) => <button key={s} type="button" disabled={!editableDisp} className={`cfgc-chip ${arr("segmentos").includes(s) ? "on" : ""}`} onClick={() => toggle("segmentos", s)}>{s.replace(/_/g, " ")}</button>)}</div>
                   </div>
                   <div>
-                    <span className="lbl" style={{ display: "block", marginBottom: 6 }}>Canales habilitados <small className="muted">(vacío = todos)</small></span>
-                    <div className="cfgc-chips">{CANALES.map((s) => <button key={s} type="button" disabled={!editable} className={`cfgc-chip ${arr("canales").includes(s) ? "on" : ""}`} onClick={() => toggle("canales", s)}>{s}</button>)}</div>
+                    <span className="lbl" style={{ display: "block", marginBottom: 6 }}>Canales habilitados <small className="muted">(vacío = todos los canales; en el portal público sólo se ofrece si la Disponibilidad está activa)</small></span>
+                    <div className="cfgc-chips">{catCanales.map((s) => <button key={s} type="button" disabled={!editableDisp} className={`cfgc-chip ${arr("canales").includes(s) ? "on" : ""}`} onClick={() => toggle("canales", s)}>{s}</button>)}</div>
                   </div>
                   <div className="cfgc-fgrid">
-                    <label className="f"><span className="lbl">Edad mínima</span><input disabled={!editable} className="num" type="number" value={comp.config.edadMin ?? ""} onChange={(e) => setCompCfg(comp.codigo, { edadMin: Number(e.target.value) || 0 })} /></label>
-                    <label className="f"><span className="lbl">Edad máxima</span><input disabled={!editable} className="num" type="number" value={comp.config.edadMax ?? ""} onChange={(e) => setCompCfg(comp.codigo, { edadMax: Number(e.target.value) || 0 })} /></label>
-                    <label className="f"><span className="lbl">Antigüedad mín. (meses)</span><input disabled={!editable} className="num" type="number" value={comp.config.antiguedadMinMeses ?? ""} onChange={(e) => setCompCfg(comp.codigo, { antiguedadMinMeses: Number(e.target.value) || 0 })} /></label>
-                    <label className="f"><span className="lbl">Requiere garante</span><select disabled={!editable} value={String(!!comp.config.requiereGarante)} onChange={(e) => setCompCfg(comp.codigo, { requiereGarante: e.target.value === "true" })}><option value="true">Sí</option><option value="false">No</option></select></label>
-                    <label className="f"><span className="lbl">Vigente desde</span><input disabled={!editable} type="date" value={comp.config.vigenteDesde || ""} onChange={(e) => setCompCfg(comp.codigo, { vigenteDesde: e.target.value })} /></label>
-                    <label className="f"><span className="lbl">Vigente hasta</span><input disabled={!editable} type="date" value={comp.config.vigenteHasta || ""} onChange={(e) => setCompCfg(comp.codigo, { vigenteHasta: e.target.value })} /></label>
+                    <label className="f"><span className="lbl">Edad mínima</span><input disabled={!editableDisp} className="num" type="number" value={comp.config.edadMin ?? ""} onChange={(e) => setCompCfg(comp.codigo, { edadMin: Number(e.target.value) || 0 })} /></label>
+                    <label className="f"><span className="lbl">Edad máxima</span><input disabled={!editableDisp} className="num" type="number" value={comp.config.edadMax ?? ""} onChange={(e) => setCompCfg(comp.codigo, { edadMax: Number(e.target.value) || 0 })} /></label>
+                    <label className="f"><span className="lbl">Antigüedad mín. (meses)</span><input disabled={!editableDisp} className="num" type="number" value={comp.config.antiguedadMinMeses ?? ""} onChange={(e) => setCompCfg(comp.codigo, { antiguedadMinMeses: Number(e.target.value) || 0 })} /></label>
+                    <label className="f"><span className="lbl">Requiere garante</span><select disabled={!editableDisp} value={String(!!comp.config.requiereGarante)} onChange={(e) => setCompCfg(comp.codigo, { requiereGarante: e.target.value === "true" })}><option value="true">Sí</option><option value="false">No</option></select></label>
+                    <label className="f"><span className="lbl">Vigente desde</span><input disabled={!editableDisp} type="date" value={comp.config.vigenteDesde || ""} onChange={(e) => setCompCfg(comp.codigo, { vigenteDesde: e.target.value })} /></label>
+                    <label className="f"><span className="lbl">Vigente hasta</span><input disabled={!editableDisp} type="date" value={comp.config.vigenteHasta || ""} onChange={(e) => setCompCfg(comp.codigo, { vigenteHasta: e.target.value })} /></label>
                   </div>
+                  {!editable && editableDisp && (
+                    <div className="cfgc-disp-save">
+                      <span className="muted">La disponibilidad (canales/segmentos) se puede modificar aunque la línea esté publicada — no crea versión nueva.</span>
+                      <button className="btn primary sm" onClick={guardarDisponibilidad}>💾 Guardar disponibilidad</button>
+                    </div>
+                  )}
                 </div>);
               })()}
 

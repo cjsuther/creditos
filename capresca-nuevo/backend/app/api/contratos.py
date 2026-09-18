@@ -28,7 +28,8 @@ from app.services import auditoria as audit
 from app.services.productos_calc import cronograma
 from app.api.productos import (_serial, _serial_efectivo, _version_efectiva,
                                _calc_codigo_por_version, _ultima, _tasa, _tna_base, _cargo,
-                               _disponibilidad, _elegibilidad, SEGMENTOS_CATALOGO, CANALES_CATALOGO,
+                               _disponibilidad, _elegibilidad, SEGMENTOS_CATALOGO, canales_catalogo,
+                               canal_backoffice, decimales_calculo, decimales_mostrar,
                                RELACION_PRICING, _bonus_relacion, _contab_cfg, _params_cronograma,
                                _feriados_engine)
 from app.services import contabilidad as cont
@@ -176,9 +177,12 @@ def _serial_contrato(c: m.PPContrato, db: Session | None = None) -> dict:
 
 
 @router.get("/segmentos")
-def segmentos():
-    """Catálogo de segmentos/canales (Fase E) y relaciones/relationship pricing (Fase G)."""
-    return {"segmentos": SEGMENTOS_CATALOGO, "canales": CANALES_CATALOGO,
+def segmentos(db: Session = Depends(get_db)):
+    """Catálogo de segmentos/canales (Fase E) y relaciones/relationship pricing (Fase G).
+    Los canales salen de Parámetros (configurable), no de una lista hardcodeada — H-185."""
+    return {"segmentos": SEGMENTOS_CATALOGO, "canales": canales_catalogo(db),
+            "canalBackoffice": canal_backoffice(db),
+            "decimalesCalculo": decimales_calculo(db), "decimalesMostrar": decimales_mostrar(db),
             "relaciones": [{"codigo": k, "bonusTna": v} for k, v in RELACION_PRICING.items()]}
 
 
@@ -288,8 +292,16 @@ def oferta(db: Session = Depends(get_db),
         v = _version_efectiva(p)   # la versión VIGENTE por fecha (no un borrador nuevo)
         if v.estado != "PUBLICADO":
             continue
+        disp = _disponibilidad(v)
+        # Filtro DURO de canal (H-185): si el operador origina por un canal y el producto declara canales
+        # que no lo incluyen (p. ej. un producto "solo WEB" y el operador está en SUCURSAL), el producto NO
+        # se lista en la oferta del backoffice — no alcanza con marcarlo no elegible. Sin canal, catálogo full.
+        if canal:
+            canales = [str(x).upper() for x in (disp or {}).get("canales", [])]
+            if canales and canal.upper() not in canales:
+                continue
         it = _serial_efectivo(db, p, calc_map)   # ofrece las condiciones de la versión vigente
-        it["elegibilidad"] = _elegibilidad(_disponibilidad(v), ctx)
+        it["elegibilidad"] = _elegibilidad(disp, ctx)
         if solo_elegibles and not it["elegibilidad"]["elegible"]:
             continue
         items.append(it)
@@ -517,7 +529,13 @@ def _originar_impl(db: Session, data: OriginarIn, user) -> dict:
         raise HTTPException(422, f"Plazo fuera de rango ({v.plazo_minimo}–{v.plazo_maximo}).")
 
     # Disponibilidad / segmentación (Fase E): valida el perfil del solicitante contra el producto.
-    elig = _elegibilidad(_disponibilidad(v), _ctx(data.segmento, data.canal, data.edad, data.antiguedad_meses))
+    # Canal efectivo (H-184): originar desde el backoffice SIN canal explícito no debe saltear la
+    # restricción de canal del producto — antes, `canal` vacío hacía que `_elegibilidad` no evaluara el
+    # canal y un producto "solo WEB" quedaba originable como venta de sucursal. Se hereda el canal de la
+    # solicitud web cuando la originación viene de una (procesar una solicitud del portal es legítimo);
+    # si no hay solicitud, se asume SUCURSAL (contexto backoffice).
+    canal_ef = data.canal or (sol_pp.canal if sol_pp else None) or canal_backoffice(db)
+    elig = _elegibilidad(_disponibilidad(v), _ctx(data.segmento, canal_ef, data.edad, data.antiguedad_meses))
     if not elig["elegible"]:
         raise HTTPException(422, "No cumple la disponibilidad de la línea: " + " ".join(elig["motivos"]))
 
@@ -547,7 +565,7 @@ def _originar_impl(db: Session, data: OriginarIn, user) -> dict:
     tna = max(piso, 0.0, tna + bonus)
 
     feriados_eng = _feriados_engine(db)
-    filas = cronograma(sistema, data.monto, data.plazo, tna, cargo, hoy, **_params_cronograma(v, feriados_eng))
+    filas = cronograma(sistema, data.monto, data.plazo, tna, cargo, hoy, **_params_cronograma(v, feriados_eng, decimales_calculo(db)))
 
     es_var = bool(tna_row and tna_row.modalidad == "VARIABLE")
     snapshot = {"producto": prod.nombre, "codigo": prod.codigo, "version": v.numero_version,

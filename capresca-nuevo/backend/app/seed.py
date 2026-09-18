@@ -88,16 +88,20 @@ def seed(db: Session) -> None:
                             plazo_max=60, monto_max=Decimal("5000000")),
     ])
 
-    db.add_all([
+    from app.core.codigos import codigo_cliente, codigo_cliente_provisorio
+    _clientes = [
         models.Cliente(
-            id_cliente="202012345678", cuil="20123456786", dni="12345678",
+            id_cliente=codigo_cliente_provisorio(), cuil="20123456786", dni="12345678",
             apellido_nombre="PEREZ, JUAN CARLOS", sueldo=Decimal("650000"),
             cbu="0110466420046600526713", organismo_id=org.id),
         models.Cliente(
-            id_cliente="202723456781", cuil="27234567818", dni="23456781",
+            id_cliente=codigo_cliente_provisorio(), cuil="27234567818", dni="23456781",
             apellido_nombre="GOMEZ, MARIA LAURA", sueldo=Decimal("820000"),
             cbu="0110466420046600520531", organismo_id=org.id),
-    ])
+    ]
+    db.add_all(_clientes); db.flush()
+    for _c in _clientes:                      # id_cliente autogenerado del PK (no CUIL) — H-169
+        _c.id_cliente = codigo_cliente(_c.id)
 
     db.add_all([
         models.TipoTramite(nombre="Solicitud de crédito", prefijo="CR"),

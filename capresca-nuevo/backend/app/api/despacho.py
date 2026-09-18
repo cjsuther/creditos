@@ -1,7 +1,7 @@
 """Módulo Despacho: resoluciones/disposiciones y expedientes con pases."""
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
@@ -28,20 +28,57 @@ def modelos_resolucion(q: str | None = None, db: Session = Depends(get_db)):
     if q:
         qy = qy.where(models.ModeloResolucion.descripcion.like(f"%{q.upper()}%"))
     ms = db.scalars(qy.order_by(models.ModeloResolucion.descripcion)).all()
-    return [{"codigo": m.codigo, "descripcion": m.descripcion,
+    # El COD_MOD legacy se repite entre tipos: el identificador único es `id` (se usa como key/valor en la UI).
+    return [{"id": m.id, "codigo": m.codigo, "descripcion": m.descripcion,
              "tipo": "Disposición" if m.es_disposicion else "Resolución",
              "seguros": m.es_seguros, "tiene_plantilla": m.tiene_plantilla}
             for m in ms]
 
 
-@router.get("/modelos/{codigo}")
-def modelo_detalle(codigo: int, db: Session = Depends(get_db)):
-    """Un modelo con su plantilla (texto base que se copia al elegir "Modelo a utilizar")."""
-    m = db.scalar(select(models.ModeloResolucion).where(models.ModeloResolucion.codigo == codigo))
+@router.get("/modelos/{modelo_id}")
+def modelo_detalle(modelo_id: int, db: Session = Depends(get_db)):
+    """Un modelo (por id único) con su plantilla (texto base que se copia al elegir "Modelo a utilizar")."""
+    m = db.get(models.ModeloResolucion, modelo_id)
     if not m:
         raise HTTPException(404, "Modelo no encontrado")
-    return {"codigo": m.codigo, "descripcion": m.descripcion, "plantilla": m.plantilla,
-            "tipo": "Disposición" if m.es_disposicion else "Resolución"}
+    return _modelo_out(m)
+
+
+def _modelo_out(m: models.ModeloResolucion) -> dict:
+    return {"id": m.id, "codigo": m.codigo, "descripcion": m.descripcion, "plantilla": m.plantilla,
+            "es_disposicion": m.es_disposicion, "es_seguros": m.es_seguros,
+            "tiene_plantilla": m.tiene_plantilla, "tipo": "Disposición" if m.es_disposicion else "Resolución"}
+
+
+@router.post("/modelos", status_code=201)
+def crear_modelo(data: schemas.ModeloResolucionIn, db: Session = Depends(get_db),
+                 _u: models.Usuario = Depends(_perfil_desp)):
+    """Alta de un modelo/plantilla de resolución (editor mini-Word). El código se asigna solo."""
+    es_dis = (data.tipo or "RES").upper() == "DIS"
+    prox = (db.scalar(select(func.max(models.ModeloResolucion.codigo))) or 0) + 1  # código legacy = etiqueta
+    m = models.ModeloResolucion(
+        codigo=prox, tipo_res=3 if es_dis else 1, descripcion=data.descripcion.strip().upper()[:120],
+        es_disposicion=es_dis, es_seguros=data.seguros,
+        plantilla=(data.plantilla or "")[:20000], tiene_plantilla=bool((data.plantilla or "").strip()))
+    db.add(m); db.commit(); db.refresh(m)
+    return _modelo_out(m)
+
+
+@router.put("/modelos/{modelo_id}")
+def editar_modelo(modelo_id: int, data: schemas.ModeloResolucionIn, db: Session = Depends(get_db),
+                  _u: models.Usuario = Depends(_perfil_desp)):
+    m = db.get(models.ModeloResolucion, modelo_id)
+    if not m:
+        raise HTTPException(404, "Modelo no encontrado")
+    es_dis = (data.tipo or "RES").upper() == "DIS"
+    m.descripcion = data.descripcion.strip().upper()[:120]
+    m.es_disposicion = es_dis
+    m.tipo_res = 3 if es_dis else 1
+    m.es_seguros = data.seguros
+    m.plantilla = (data.plantilla or "")[:20000]
+    m.tiene_plantilla = bool((data.plantilla or "").strip())
+    db.commit(); db.refresh(m)
+    return _modelo_out(m)
 
 
 # ---------------- Resoluciones ----------------
@@ -82,7 +119,22 @@ def crear_resolucion(data: schemas.ResolucionCreate, db: Session = Depends(get_d
     try:
         r = svc.crear_resolucion(
             db, tipo=data.tipo, asunto=data.asunto, texto=data.texto, organo=data.organo,
-            fecha=data.fecha, modelo_codigo=data.modelo_codigo, importe=data.importe,
+            fecha=data.fecha, modelo_id=data.modelo_id, modelo_codigo=data.modelo_codigo,
+            importe=data.importe, origen=data.origen,
+            beneficiarios=[b.model_dump() for b in data.beneficiarios])
+    except svc.ReglaNegocioError as e:
+        raise HTTPException(422, str(e))
+    return obtener_resolucion(r.id, db)
+
+
+@router.put("/resoluciones/{resol_id}", response_model=schemas.ResolucionDetalle)
+def editar_resolucion(resol_id: int, data: schemas.ResolucionUpdate, db: Session = Depends(get_db),
+                      _u: models.Usuario = Depends(_perfil_desp)):
+    """Edita un borrador (no cambia tipo/número/año; sólo si aún no es oficial)."""
+    try:
+        r = svc.editar_resolucion(
+            db, resol_id=resol_id, fecha=data.fecha, modelo_id=data.modelo_id,
+            modelo_codigo=data.modelo_codigo, texto=data.texto, importe=data.importe,
             origen=data.origen, beneficiarios=[b.model_dump() for b in data.beneficiarios])
     except svc.ReglaNegocioError as e:
         raise HTTPException(422, str(e))

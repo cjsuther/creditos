@@ -69,9 +69,9 @@ export default function Topbar() {
                 aria-label="Cambiar tema">
           <Icon name={theme === "dark" ? "sun" : "moon"} size={17} />
         </button>
-        <button className="icon-btn bell-btn" title={pendientes ? `${pendientes} tarea(s) de aprobación pendiente(s)` : "Notificaciones"}
-                aria-label="Notificaciones" onClick={() => nav("/creditos/inbox-aprobaciones")}>
-          <Icon name="bell" size={17} />
+        <button className="icon-btn bell-btn" title={pendientes ? `Inbox — ${pendientes} pendiente(s)` : "Inbox"}
+                aria-label="Inbox" onClick={() => nav("/creditos/inbox-aprobaciones")}>
+          <Icon name="inbox" size={17} />
           {pendientes > 0 && <span className="bell-badge">{pendientes > 9 ? "9+" : pendientes}</span>}
         </button>
         <div className="userchip">

@@ -1,5 +1,6 @@
 // Cliente HTTP mínimo para la API CCyPP.
 const TOKEN_KEY = "ccypp_token";
+const EMPRESA_KEY = "ccypp_empresa";   // empresa contable activa (multi-plan, H-188)
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -11,6 +12,17 @@ export function logout() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// Empresa contable activa: la eligen las pantallas de Contabilidad; se agrega como empresa_id a TODA
+// llamada /contabilidad/* (los endpoints que no la usan la ignoran). Cambia en un solo lugar.
+export function getEmpresaActiva(): number | undefined {
+  const v = localStorage.getItem(EMPRESA_KEY);
+  return v ? Number(v) : undefined;
+}
+export function setEmpresaActiva(id: number | undefined) {
+  if (id) localStorage.setItem(EMPRESA_KEY, String(id)); else localStorage.removeItem(EMPRESA_KEY);
+  window.dispatchEvent(new CustomEvent("empresa-cambiada", { detail: id }));
+}
+
 async function req(path: string, options: RequestInit = {}) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -18,6 +30,11 @@ async function req(path: string, options: RequestInit = {}) {
   };
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  // Inyecta la empresa activa en las llamadas contables (si no viene ya en la URL).
+  const emp = getEmpresaActiva();
+  if (emp && path.startsWith("/contabilidad/") && !/[?&]empresa_id=/.test(path)) {
+    path += (path.includes("?") ? "&" : "?") + `empresa_id=${emp}`;
+  }
   const res = await fetch(`/api${path}`, { ...options, headers });
   if (res.status === 401) {
     // Token ausente o vencido: limpiar sesión y volver al login (evita pantallas
@@ -29,10 +46,39 @@ async function req(path: string, options: RequestInit = {}) {
     throw new Error("Sesión expirada. Volvé a iniciar sesión.");
   }
   if (!res.ok) {
-    const detail = await res.json().catch(() => ({}));
-    throw new Error(detail.detail || `Error ${res.status}`);
+    const data = await res.json().catch(() => ({} as any));
+    throw new Error(mensajeDeError(data, res.status));
   }
   return res.status === 204 ? null : res.json();
+}
+
+// FastAPI devuelve `detail` como string (HTTPException) o como ARRAY de errores de validación
+// (Pydantic 422). Sin normalizar, `new Error(array)` se renderiza como "[object Object]" en pantalla.
+// Acá lo convertimos a un mensaje legible por campo (H-200).
+function mensajeDeError(data: any, status: number): string {
+  const d = data?.detail;
+  if (typeof d === "string" && d.trim()) return d;
+  if (Array.isArray(d) && d.length) {
+    const partes = d.map((e: any) => {
+      const loc = Array.isArray(e?.loc) ? e.loc.filter((x: any) => x !== "body") : [];
+      const campo = loc.length ? String(loc[loc.length - 1]) : "";
+      const ctx = e?.ctx || {};
+      let msg: string;
+      switch (e?.type) {
+        case "greater_than_equal": msg = `debe ser ≥ ${ctx.ge}`; break;
+        case "less_than_equal": msg = `debe ser ≤ ${ctx.le}`; break;
+        case "greater_than": msg = `debe ser > ${ctx.gt}`; break;
+        case "less_than": msg = `debe ser < ${ctx.lt}`; break;
+        case "missing": msg = "es obligatorio"; break;
+        case "string_too_short": msg = `mínimo ${ctx.min_length} caracteres`; break;
+        case "string_too_long": msg = `máximo ${ctx.max_length} caracteres`; break;
+        default: msg = e?.msg || "valor inválido";
+      }
+      return campo ? `${campo}: ${msg}` : msg;
+    }).filter(Boolean);
+    if (partes.length) return partes.join(" · ");
+  }
+  return `Error ${status}`;
 }
 
 // POST idempotente: manda una Idempotency-Key para que el backend deduplique reintentos, y ademas
@@ -106,6 +152,7 @@ export const api = {
   indiceReactivar: (id: number) => req(`/indices/${id}/reactivar`, { method: "POST" }),
   ppGuardarConfig: (id: string, cfg: any) => req(`/productos/${id}/config`, { method: "PUT", body: JSON.stringify(cfg) }),
   ppNuevaVersion: (id: string) => req(`/productos/${id}/nueva-version`, { method: "POST" }),
+  ppPublicarDirecto: (id: string) => req(`/productos/${id}/publicar-directo`, { method: "POST" }),
   ppEstado: (id: string, accion: string) => req(`/productos/${id}/estado`, { method: "POST", body: JSON.stringify({ accion }) }),
   ppBorrar: (id: string) => req(`/productos/${id}`, { method: "DELETE" }),
   // Originación (Fase 5) y servicing (Fase 6)
@@ -140,8 +187,8 @@ export const api = {
   ppSolicitudCrear: (d: any) => postIdem(`/solicitudes`, d),
   ppSolicitud: (id: string) => req(`/solicitudes/${id}`),
   ppSolicitudEditar: (id: string, d: any) => req(`/solicitudes/${id}`, { method: "PUT", body: JSON.stringify(d) }),
-  ppSolicitudEstado: (id: string, accion: string, motivo = "") => req(`/solicitudes/${id}/estado`, { method: "POST", body: JSON.stringify({ accion, motivo }) }),
-  ppSolicitudPromover: (id: string, d: { cuil?: string; dni?: string; apellido_nombre?: string } = {}) => req(`/solicitudes/${id}/promover-cliente`, { method: "POST", body: JSON.stringify(d) }),
+  ppSolicitudEstado: (id: string, accion: string, motivo = "", observacion = "") => req(`/solicitudes/${id}/estado`, { method: "POST", body: JSON.stringify({ accion, motivo, observacion }) }),
+  ppSolicitudPromover: (id: string, d: { cliente_id?: number; cuil?: string; dni?: string; apellido_nombre?: string } = {}) => req(`/solicitudes/${id}/promover-cliente`, { method: "POST", body: JSON.stringify(d) }),
   ppSolicitudDocs: (sid: string) => req(`/solicitudes/${sid}/documentos`),
   ppSolicitudDocAbrir: (sid: string, docId: string) => abrirArchivo(`/api/solicitudes/${sid}/documentos/${docId}`),
   ctoDevengar: (id: string) => req(`/contratos/${id}/devengar`, { method: "POST" }),
@@ -238,6 +285,47 @@ export const api = {
   verReciboPdf: (id: number) => abrirArchivo(`/api/caja/recibos/${id}/pdf`),
   comprobanteEgresoPdf: (id: number) => abrirArchivo(`/api/egresos/${id}/comprobante-pdf`),
   verLibroDiarioPdf: () => abrirArchivo(`/api/contabilidad/libro-diario/pdf`),
+  planCuentas: (q = "", emp?: number) => { const s = new URLSearchParams(); if (q) s.set("q", q); if (emp) s.set("empresa_id", String(emp)); const qs = s.toString(); return req(`/contabilidad/plan-cuentas${qs ? `?${qs}` : ""}`); },
+  crearCuenta: (data: any, emp?: number) => postIdem(`/contabilidad/plan-cuentas${emp ? `?empresa_id=${emp}` : ""}`, data),
+  editarCuenta: (id: number, data: any) => req(`/contabilidad/plan-cuentas/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  borrarCuenta: (id: number) => req(`/contabilidad/plan-cuentas/${id}`, { method: "DELETE" }),
+  editarDisponibilidad: (id: string, body: any) => req(`/productos/${id}/disponibilidad`, { method: "PUT", body: JSON.stringify(body) }),
+  // Empresas / entes contables (multi-plan — H-188)
+  empresas: () => req(`/contabilidad/empresas`),
+  crearEmpresa: (data: any) => req(`/contabilidad/empresas`, { method: "POST", body: JSON.stringify(data) }),
+  setEmpresaPredeterminada: (id: number) => req(`/contabilidad/empresas/${id}/predeterminada`, { method: "POST" }),
+  restaurarPlanCuentas: () => req(`/contabilidad/plan-cuentas/restaurar-plantilla`, { method: "POST" }),
+  cargarPlanEstandar: () => req(`/contabilidad/plan-cuentas/cargar-estandar`, { method: "POST" }),
+  asientosManuales: () => req(`/contabilidad/asientos-manuales`),
+  crearAsientoManual: (payload: any) => postIdem(`/contabilidad/asientos-manuales`, payload),
+  reversarAsiento: (id: number) => req(`/contabilidad/asientos-manuales/${id}/reversar`, { method: "POST" }),
+  editarAsientoManual: (id: number, payload: any) => req(`/contabilidad/asientos-manuales/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  publicarAsiento: (id: number) => req(`/contabilidad/asientos-manuales/${id}/publicar`, { method: "POST" }),
+  eliminarAsientoManual: (id: number) => req(`/contabilidad/asientos-manuales/${id}`, { method: "DELETE" }),
+  diariosContables: () => req(`/contabilidad/diarios`),
+  centrosCosto: () => req(`/contabilidad/centros-costo`),
+  crearCentro: (payload: any) => req(`/contabilidad/centros-costo`, { method: "POST", body: JSON.stringify(payload) }),
+  editarCentro: (id: number, payload: any) => req(`/contabilidad/centros-costo/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  porCentro: (desde = "", hasta = "") => { const s = new URLSearchParams(); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); const q = s.toString(); return req(`/contabilidad/por-centro${q ? `?${q}` : ""}`); },
+  ejercicios: () => req(`/contabilidad/ejercicios`),
+  crearEjercicio: (payload: any) => req(`/contabilidad/ejercicios`, { method: "POST", body: JSON.stringify(payload) }),
+  cerrarEjercicio: (id: number) => req(`/contabilidad/ejercicios/${id}/cerrar`, { method: "POST" }),
+  reabrirEjercicio: (id: number) => req(`/contabilidad/ejercicios/${id}/reabrir`, { method: "POST" }),
+  aperturaEjercicio: (id: number) => req(`/contabilidad/ejercicios/${id}/apertura`, { method: "POST" }),
+  sumasYSaldos: (desde = "", hasta = "") => { const s = new URLSearchParams(); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); const q = s.toString(); return req(`/contabilidad/sumas-y-saldos${q ? `?${q}` : ""}`); },
+  estadosContables: (desde = "", hasta = "") => { const s = new URLSearchParams(); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); const q = s.toString(); return req(`/contabilidad/estados-contables${q ? `?${q}` : ""}`); },
+  flujoEfectivo: (desde = "", hasta = "") => { const s = new URLSearchParams(); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); const q = s.toString(); return req(`/contabilidad/flujo-efectivo${q ? `?${q}` : ""}`); },
+  conciliacion: (cuenta = "1.1.02", desde = "", hasta = "") => { const s = new URLSearchParams(); s.set("cuenta", cuenta); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); return req(`/contabilidad/conciliacion?${s.toString()}`); },
+  crearExtracto: (body: any) => req(`/contabilidad/conciliacion/extracto`, { method: "POST", body: JSON.stringify(body) }),
+  borrarExtracto: (id: number) => req(`/contabilidad/conciliacion/extracto/${id}`, { method: "DELETE" }),
+  conciliar: (extracto_id: number, asiento_linea_id: number) => req(`/contabilidad/conciliacion/conciliar`, { method: "POST", body: JSON.stringify({ extracto_id, asiento_linea_id }) }),
+  desconciliar: (id: number) => req(`/contabilidad/conciliacion/desconciliar/${id}`, { method: "POST" }),
+  conciliarAutomatica: (cuenta = "1.1.02") => req(`/contabilidad/conciliacion/automatica?cuenta=${encodeURIComponent(cuenta)}`, { method: "POST" }),
+  sumasYSaldosExcel: (desde = "", hasta = "") => { const s = new URLSearchParams(); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); const q = s.toString(); return abrirArchivo(`/api/contabilidad/sumas-y-saldos/excel${q ? `?${q}` : ""}`, "sumas_y_saldos.xlsx"); },
+  estadosContablesExcel: (desde = "", hasta = "") => { const s = new URLSearchParams(); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); const q = s.toString(); return abrirArchivo(`/api/contabilidad/estados-contables/excel${q ? `?${q}` : ""}`, "estados_contables.xlsx"); },
+  libroDiarioExcel: (desde = "", hasta = "") => { const s = new URLSearchParams(); if (desde) s.set("desde", desde); if (hasta) s.set("hasta", hasta); const q = s.toString(); return abrirArchivo(`/api/contabilidad/libro-diario/excel${q ? `?${q}` : ""}`, "libro_diario.xlsx"); },
+  imputaciones: () => req(`/contabilidad/imputaciones`),
+  editarImputacion: (id: number, cuenta_codigo: string) => req(`/contabilidad/imputaciones/${id}`, { method: "PUT", body: JSON.stringify({ cuenta_codigo }) }),
   balance: (desde = "", hasta = "") => {
     const s = new URLSearchParams();
     if (desde) s.set("desde", desde);
@@ -606,7 +694,7 @@ export const api = {
   adminProveedores: (q = "") => req(`/admin/proveedores${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   crearProveedor: (payload: any) =>
     req(`/admin/proveedores`, { method: "POST", body: JSON.stringify(payload) }),
-  adminParametros: () => req(`/admin/parametros`),
+  adminParametros: (ambito?: string) => req(`/admin/parametros${ambito ? `?ambito=${encodeURIComponent(ambito)}` : ""}`),
   upsertParametro: (payload: any) =>
     req(`/admin/parametros`, { method: "POST", body: JSON.stringify(payload) }),
   adminUsuarios: () => req(`/admin/usuarios`),
@@ -694,9 +782,14 @@ export const api = {
     const qs = s.toString();
     return req(`/despacho/resoluciones${qs ? `?${qs}` : ""}`);
   },
-  modeloResolucion: (codigo: number) => req(`/despacho/modelos/${codigo}`),
+  modeloResolucion: (id: number) => req(`/despacho/modelos/${id}`),
+  crearModeloResolucion: (payload: any) => postIdem(`/despacho/modelos`, payload),
+  editarModeloResolucion: (id: number, payload: any) =>
+    req(`/despacho/modelos/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   resolucion: (id: number) => req(`/despacho/resoluciones/${id}`),
   crearResolucion: (payload: any) => postIdem(`/despacho/resoluciones`, payload),
+  editarResolucion: (id: number, payload: any) =>
+    req(`/despacho/resoluciones/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   cargarNumeroReal: (id: number, payload: any = {}) =>
     req(`/despacho/resoluciones/${id}/numero-real`, { method: "POST", body: JSON.stringify(payload) }),
   firmarResolucion: (id: number) =>

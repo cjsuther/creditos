@@ -28,10 +28,10 @@ import PendientesCobro from "./pages/creditos/PendientesCobro";
 import EnviosPadron from "./pages/creditos/EnviosPadron";
 import Jubilados from "./pages/creditos/Jubilados";
 import ConfigurarCreditos from "./pages/creditos/ConfigurarCreditos";
-import OriginarCredito from "./pages/creditos/OriginarCredito";
 import LiquidacionLote from "./pages/creditos/LiquidacionLote";
 import SistemaCalculos from "./pages/creditos/SistemaCalculos";
 import SolicitudesCredito from "./pages/creditos/SolicitudesCredito";
+import ParametrosCreditos from "./pages/creditos/ParametrosCreditos";
 import CajaCreditos from "./pages/creditos/CajaCreditos";
 import SituacionClientePP from "./pages/creditos/SituacionClientePP";
 import TableroCartera from "./pages/creditos/TableroCartera";
@@ -69,6 +69,13 @@ import BuscaEgresos from "./pages/tesoreria/BuscaEgresos";
 import LibroDiario from "./pages/contabilidad/LibroDiario";
 import BalanceMayor from "./pages/contabilidad/BalanceMayor";
 import Impuestos from "./pages/contabilidad/Impuestos";
+import PlanCuentas from "./pages/contabilidad/PlanCuentas";
+import Asientos from "./pages/contabilidad/Asientos";
+import EstadosContables from "./pages/contabilidad/EstadosContables";
+import Imputaciones from "./pages/contabilidad/Imputaciones";
+import Ejercicios from "./pages/contabilidad/Ejercicios";
+import Conciliacion from "./pages/contabilidad/Conciliacion";
+import Centros from "./pages/contabilidad/Centros";
 import Indices from "./pages/contabilidad/Indices";
 import Feriados from "./pages/contabilidad/Feriados";
 import IvaCuotas from "./pages/contabilidad/IvaCuotas";
@@ -179,10 +186,12 @@ export default function App() {
       <Route path="/creditos/jubilados" element={<Private><Jubilados /></Private>} />
       <Route path="/creditos/lineas" element={<Private><LineasCredito /></Private>} />
       <Route path="/creditos/configurar" element={<Private><ConfigurarCreditos /></Private>} />
-      <Route path="/creditos/originar" element={<Private><OriginarCredito /></Private>} />
+      {/* "Originar Crédito (oferta)" retirado: su flujo está unificado en Solicitudes de crédito (H-195). */}
+      <Route path="/creditos/originar" element={<Navigate to="/creditos/solicitudes-credito" replace />} />
       <Route path="/creditos/liquidacion-lote" element={<Private><LiquidacionLote /></Private>} />
       <Route path="/creditos/sistema-calculos" element={<Private><SistemaCalculos /></Private>} />
       <Route path="/creditos/solicitudes-credito" element={<Private><SolicitudesCredito /></Private>} />
+      <Route path="/creditos/parametros" element={<Private><ParametrosCreditos /></Private>} />
       <Route path="/creditos/caja" element={<Private><CajaCreditos /></Private>} />
       <Route path="/creditos/situacion-linea" element={<Private><SituacionClientePP /></Private>} />
       <Route path="/creditos/inbox-aprobaciones" element={<Private><InboxAprobaciones /></Private>} />
@@ -220,6 +229,13 @@ export default function App() {
 
       {/* Contabilidad */}
       <Route path="/contabilidad/mayor" element={<Private><BalanceMayor /></Private>} />
+      <Route path="/contabilidad/plan-cuentas" element={<Private><PlanCuentas /></Private>} />
+      <Route path="/contabilidad/asientos" element={<Private><Asientos /></Private>} />
+      <Route path="/contabilidad/estados" element={<Private><EstadosContables /></Private>} />
+      <Route path="/contabilidad/imputaciones" element={<Private><Imputaciones /></Private>} />
+      <Route path="/contabilidad/ejercicios" element={<Private><Ejercicios /></Private>} />
+      <Route path="/contabilidad/conciliacion" element={<Private><Conciliacion /></Private>} />
+      <Route path="/contabilidad/centros-costo" element={<Private><Centros /></Private>} />
       <Route path="/contabilidad/impuestos" element={<Private><Impuestos /></Private>} />
       <Route path="/contabilidad/indices" element={<Private><Indices /></Private>} />
       <Route path="/contabilidad/feriados" element={<Private><Feriados /></Private>} />
@@ -285,7 +301,7 @@ export default function App() {
       <Route path="/general/companias" element={<Private><Companias /></Private>} />
       <Route path="/general/parametros" element={<Private><Parametros /></Private>} />
 
-      <Route path="*" element={<Navigate to="/creditos/solicitudes" />} />
+      <Route path="*" element={<Navigate to="/creditos/inbox-aprobaciones" />} />
     </Routes>
     </>
   );

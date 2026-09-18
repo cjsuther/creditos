@@ -89,25 +89,39 @@ export default function LiquidacionLote() {
       </div>
 
       {sel && (
-        <div className="card" style={{ padding: 0, marginTop: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
-            <div>
-              <div className="eyebrow">Lote del {fecha(sel.fecha)}</div>
-              <b>{sel.cantidad} crédito(s) · {money(sel.montoTotal)}</b>
+        <div className="liq-ov" onMouseDown={(e) => { if (e.target === e.currentTarget) setSel(null); }}>
+          <div className="liq-modal">
+            <div className="liq-mh">
+              <div>
+                <div className="eyebrow">Lote del {fecha(sel.fecha)}</div>
+                <b style={{ fontSize: 15 }}>{sel.cantidad} crédito(s) · {money(sel.montoTotal)}</b>
+              </div>
+              <button className="liq-x" onClick={() => setSel(null)} aria-label="Cerrar">✕</button>
             </div>
-            <div style={{ flex: 1 }} />
-            <button className="primary" disabled={soloLectura || liquidando || !sel.cantidad}
-              onClick={() => liquidar(sel)}>{liquidando ? "Liquidando…" : `💸 Liquidar lote (${sel.cantidad}) → desembolso`}</button>
+            <div className="liq-body">
+              {!!sel.pendientes && (
+                <p className="cfgc-err" style={{ marginTop: 0 }}>
+                  {sel.pendientes} crédito(s) de este lote ya están esperando la aprobación del desembolso (workflow).
+                  Se desembolsan cuando se aprueban en el Inbox de aprobaciones; volver a liquidar no los duplica.
+                </p>
+              )}
+              <DataTable columns={colsCtos} rows={sel.contratos} rowKey={(c) => c.id} clientSort defaultSort="numero" />
+            </div>
+            <div className="liq-mf">
+              <button className="btn-ghost" onClick={() => setSel(null)}>Cerrar</button>
+              <div style={{ flex: 1 }} />
+              <button className="primary" disabled={soloLectura || liquidando || !sel.cantidad}
+                onClick={() => liquidar(sel)}>{liquidando ? "Liquidando…" : `💸 Liquidar lote (${sel.cantidad}) → desembolso`}</button>
+            </div>
           </div>
-          {!!sel.pendientes && (
-            <p className="cfgc-err" style={{ margin: "10px 14px 0" }}>
-              {sel.pendientes} crédito(s) de este lote ya están esperando la aprobación del desembolso (workflow).
-              Se desembolsan cuando se aprueban en el Inbox de aprobaciones; volver a liquidar no los duplica.
-            </p>
-          )}
-          <div style={{ padding: "4px 14px 14px" }}>
-            <DataTable columns={colsCtos} rows={sel.contratos} rowKey={(c) => c.id} clientSort defaultSort="numero" />
-          </div>
+          <style>{`
+            .liq-ov { position:fixed; inset:0; background:rgba(16,24,40,.45); z-index:40; display:flex; align-items:center; justify-content:center; padding:16px; }
+            .liq-modal { width:min(820px,96vw); max-height:92vh; overflow:hidden; background:var(--surface); border:1px solid var(--border); border-radius:14px; box-shadow:0 24px 70px -20px rgba(16,32,64,.55); display:flex; flex-direction:column; }
+            .liq-mh { display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border); }
+            .liq-mh .liq-x { margin-left:auto; width:32px; height:32px; border-radius:8px; border:1px solid var(--border); background:var(--surface); cursor:pointer; color:var(--ink-soft); font-size:16px; }
+            .liq-body { padding:14px 18px; overflow-y:auto; }
+            .liq-mf { display:flex; gap:10px; align-items:center; padding:12px 18px; border-top:1px solid var(--border); background:var(--surface-2); }
+          `}</style>
         </div>
       )}
     </>

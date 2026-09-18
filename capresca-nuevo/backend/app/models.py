@@ -346,6 +346,7 @@ class Parametro(Base):
     clave: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     valor: Mapped[str] = mapped_column(String(200))
     descripcion: Mapped[str] = mapped_column(String(200), default="")
+    ambito: Mapped[str] = mapped_column(String(20), default="general", index=True)  # general|creditos|contabilidad (H-197)
 
 
 class Recibo(Base):
@@ -909,14 +910,110 @@ class MovimientoContable(Base):
     referencia: Mapped[str] = mapped_column(String(24), default="")   # CREFERENCI
 
 
-class CuentaContable(Base):
-    """Plan de cuentas (VFP: agjscontable)."""
-    __tablename__ = "cuentas_contables"
+class Empresa(Base):
+    """Empresa / ente contable. Cada empresa tiene su propio plan de cuentas y sus propios libros
+    (asientos, ejercicios). Habilita contabilidad separada por empresa (multi-plan). H-188."""
+    __tablename__ = "empresas"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     codigo: Mapped[str] = mapped_column(String(12), unique=True, index=True)
     nombre: Mapped[str] = mapped_column(String(80))
-    tipo: Mapped[str] = mapped_column(String(20))  # activo/pasivo/ingreso/egreso
+    cuit: Mapped[str] = mapped_column(String(13), default="")
+    predeterminada: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    activa: Mapped[bool] = mapped_column(Boolean, default=True)
+    creada_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class CuentaContable(Base):
+    """Plan de cuentas (VFP: agjscontable). Scopeado por empresa: el código es único POR empresa."""
+    __tablename__ = "cuentas_contables"
+    __table_args__ = (UniqueConstraint("empresa_id", "codigo", name="uq_cuenta_empresa_codigo"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    empresa_id: Mapped[int | None] = mapped_column(ForeignKey("empresas.id"), index=True, nullable=True)
+    codigo: Mapped[str] = mapped_column(String(12), index=True)
+    nombre: Mapped[str] = mapped_column(String(80))
+    tipo: Mapped[str] = mapped_column(String(20))  # rubro: activo/pasivo/patrimonio/ingreso/egreso
+    # Datos de la cuenta (pantalla Plan de cuentas moderna)
+    descripcion: Mapped[str] = mapped_column(Text, default="")
+    alias: Mapped[str] = mapped_column(String(40), default="")
+    moneda: Mapped[str] = mapped_column(String(3), default="ARS")
+    clasificacion: Mapped[str] = mapped_column(String(30), default="Sin clasificar")  # Caja/Banco/Cliente…
+    saldo_normal: Mapped[str] = mapped_column(String(10), default="deudor")            # deudor|acreedor
+    imputable: Mapped[bool] = mapped_column(Boolean, default=True)   # recibe asientos (hoja); grupo=False
+    manual: Mapped[bool] = mapped_column(Boolean, default=False)     # admite carga manual
+    entidades: Mapped[list] = mapped_column(JSON, default=list)      # [{tipo, entidad}] relacionadas
+
+
+class CentroCosto(Base):
+    """Centro de costo (dimensión analítica). Se puede asignar a cada línea de asiento para analizar
+    resultados por área/negocio (Odoo: analytic accounting)."""
+    __tablename__ = "centros_costo"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(12), unique=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(60))
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ExtractoBancarioLinea(Base):
+    """Línea del extracto bancario (resumen del banco) para la conciliación. Se coteja contra los
+    movimientos del mayor en la cuenta banco. `importe` con signo: + aumenta el saldo del banco
+    (crédito/depósito), − lo disminuye (débito/pago)."""
+    __tablename__ = "extracto_bancario_lineas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    empresa_id: Mapped[int | None] = mapped_column(ForeignKey("empresas.id"), index=True, nullable=True)  # H-188
+    cuenta_codigo: Mapped[str] = mapped_column(String(12), index=True)   # cuenta banco del plan (p.ej. 1.1.02)
+    fecha: Mapped[date] = mapped_column(Date, index=True)
+    descripcion: Mapped[str] = mapped_column(String(120), default="")
+    referencia: Mapped[str] = mapped_column(String(40), default="")
+    importe: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)   # con signo (+ ingreso / − egreso)
+    conciliada: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    asiento_linea_id: Mapped[int | None] = mapped_column(ForeignKey("asientos_lineas.id"), nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class EjercicioContable(Base):
+    """Ejercicio contable (período fiscal). Estado abierto/cerrado; al cerrar se genera el asiento de
+    cierre (refundición de resultados) y se bloquea la carga de asientos con fecha en el período."""
+    __tablename__ = "ejercicios_contables"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    empresa_id: Mapped[int | None] = mapped_column(ForeignKey("empresas.id"), index=True, nullable=True)  # H-188
+    nombre: Mapped[str] = mapped_column(String(40))                 # ej. "Ejercicio 2026"
+    fecha_desde: Mapped[date] = mapped_column(Date, index=True)
+    fecha_hasta: Mapped[date] = mapped_column(Date, index=True)
+    estado: Mapped[str] = mapped_column(String(10), default="abierto")   # abierto|cerrado
+    resultado: Mapped[Decimal] = mapped_column(Numeric(16, 2), default=0)  # resultado al cierre
+    asiento_cierre_id: Mapped[int | None] = mapped_column(Integer)
+    asiento_apertura_id: Mapped[int | None] = mapped_column(Integer)
+    cerrado_en: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class DiarioContable(Base):
+    """Diario contable (Odoo: Journal). Agrupa los asientos por tipo de operación (Caja, Banco, Varios).
+    Cada asiento pertenece a un diario."""
+    __tablename__ = "diarios_contables"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str] = mapped_column(String(12), unique=True, index=True)   # CAJA, BANCO, VAR
+    nombre: Mapped[str] = mapped_column(String(60))
+    tipo: Mapped[str] = mapped_column(String(20), default="varios")            # caja/banco/varios
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ImputacionContable(Base):
+    """Parametrización contable: qué cuenta del plan imputa cada evento de una operación (otorgamiento,
+    cobranza de capital/interés/IVA…). Reemplaza los códigos hardcodeados del motor de asientos por config
+    editable. Se siembra con los códigos actuales (comportamiento sin cambios)."""
+    __tablename__ = "imputaciones_contables"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    clave: Mapped[str] = mapped_column(String(40), unique=True, index=True)   # ej. "cobranza_interes"
+    grupo: Mapped[str] = mapped_column(String(40), default="")                # ej. "Cobranza de crédito"
+    descripcion: Mapped[str] = mapped_column(String(80))                      # ej. "Intereses ganados (haber)"
+    cuenta_codigo: Mapped[str] = mapped_column(String(12))                    # código del plan de cuentas
 
 
 class CompaniaSeguros(Base):
@@ -1288,11 +1385,19 @@ class Asiento(Base):
     __tablename__ = "asientos"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    empresa_id: Mapped[int | None] = mapped_column(ForeignKey("empresas.id"), index=True, nullable=True)  # H-188
     fecha: Mapped[date] = mapped_column(Date, index=True)
     concepto: Mapped[str] = mapped_column(String(120))
-    origen: Mapped[str] = mapped_column(String(20), index=True)  # otorgamiento/cobranza/pp_*/legacy
+    origen: Mapped[str] = mapped_column(String(20), index=True)  # otorgamiento/cobranza/pp_*/legacy/manual/reversa
     ref_id: Mapped[int | None] = mapped_column(Integer)  # id de crédito/recibo
     creado: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Asientos MANUALES (contabilidad general): correlativo por año, reversa y auditoría.
+    numero: Mapped[int | None] = mapped_column(Integer, index=True)   # correlativo por año (sólo manuales)
+    reversado: Mapped[bool] = mapped_column(Boolean, default=False)   # ya tiene su contra-asiento
+    reversa_de: Mapped[int | None] = mapped_column(Integer)           # id del asiento original si es una reversa
+    usuario: Mapped[str] = mapped_column(String(30), default="")
+    estado: Mapped[str] = mapped_column(String(12), default="publicado", index=True)  # borrador|publicado
+    diario_codigo: Mapped[str] = mapped_column(String(12), default="")               # diario (Odoo journal)
 
     lineas: Mapped[list["AsientoLinea"]] = relationship(
         back_populates="asiento", cascade="all, delete-orphan")
@@ -1307,8 +1412,36 @@ class AsientoLinea(Base):
     cuenta_nombre: Mapped[str] = mapped_column(String(80))
     debe: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
     haber: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    centro_codigo: Mapped[str] = mapped_column(String(12), default="")   # centro de costo (analítica)
 
     asiento: Mapped["Asiento"] = relationship(back_populates="lineas")
+
+
+def _empresa_pred_id(connection):
+    """id de la empresa predeterminada (para defaultear empresa_id en cuentas/asientos). H-188."""
+    try:
+        row = connection.exec_driver_sql(
+            "SELECT id FROM empresas WHERE predeterminada = %s ORDER BY id LIMIT 1"
+            if connection.dialect.name != "sqlite" else
+            "SELECT id FROM empresas WHERE predeterminada = 1 ORDER BY id LIMIT 1",
+            (True,) if connection.dialect.name != "sqlite" else ()).first()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+@event.listens_for(CuentaContable, "before_insert")
+def _cuenta_empresa_default(mapper, connection, target):
+    """Si no se indicó empresa, la cuenta va a la empresa predeterminada (contabilidad por empresa). H-188."""
+    if target.empresa_id is None:
+        target.empresa_id = _empresa_pred_id(connection)
+
+
+@event.listens_for(Asiento, "before_insert")
+def _asiento_empresa_default(mapper, connection, target):
+    """Si no se indicó empresa, el asiento va a los libros de la empresa predeterminada. H-188."""
+    if target.empresa_id is None:
+        target.empresa_id = _empresa_pred_id(connection)
 
 
 @event.listens_for(Asiento, "before_insert")

@@ -34,7 +34,7 @@ from app.services.productos_calc import cronograma, resumen
 # el mismo cronograma que la originación del contrato (pp_contrato) → simulado == contratado.
 from app.api.productos import (_calc_codigo_por_version, _tna_base, _cargo,
                                _params_cronograma, _feriados_engine, _version_publicada_vigente,
-                               _disponibilidad, _elegibilidad)
+                               _disponibilidad, _elegibilidad, canal_portal, decimales_calculo)
 from app.api.contratos import _ctx
 from app.api.solicitudes import _numero as _numero_solicitud, _evaluar as _evaluar_solicitud
 from app import models_productos as m, schemas
@@ -150,14 +150,28 @@ def haberes(c: Ciudadano = Depends(get_ciudadano)):
 
 
 # --------------------- Simulador sobre el PRODUCT BUILDER (lo nuevo, motor único) ---------------------
+def _ofrecible_web(db: Session, v: m.PPVersion) -> bool:
+    """El producto se ofrece por el canal del portal. H-185/H-189: el código de canal del portal es
+    CONFIGURABLE (Parámetro CANAL_PORTAL, por defecto WEB). Regla OPT-IN para el canal público: un producto
+    aparece en el portal SÓLO si tiene la Disponibilidad CONFIGURADA (componente activo). Si la
+    Disponibilidad no está activada (sin canal definido), NO se ofrece por el portal — evita exponer al
+    público productos que nadie habilitó explícitamente para la web (H-189). Con Disponibilidad activa:
+    canales vacío = todos los canales (incluye el portal); o el canal del portal explícito."""
+    disp = _disponibilidad(v)
+    if disp is None:   # Disponibilidad NO configurada (componente inactivo) → no se ofrece públicamente
+        return False
+    canales = [str(x).upper() for x in (disp.get("canales") or [])]
+    return (not canales) or (canal_portal(db) in canales)
+
+
 @router.get("/productos", response_model=list[schemas.PortalProductoOut])
 def productos_publicos(db: Session = Depends(get_db), _c: Ciudadano = Depends(get_ciudadano)):
-    """Sólo productos PUBLICADOS y VIGENTES hoy (vista mínima)."""
+    """Sólo productos PUBLICADOS y VIGENTES hoy, y habilitados en el canal del portal (H-185)."""
     calc = _calc_codigo_por_version(db)
     out = []
     for p in db.query(m.PPProducto).all():
         v = _version_publicada_vigente(p)
-        if v is None:
+        if v is None or not _ofrecible_web(db, v):
             continue
         out.append(schemas.PortalProductoOut(
             id=p.id, nombre=p.nombre, codigo=p.codigo,
@@ -186,7 +200,7 @@ def simular(req: schemas.PortalSimularIn, db: Session = Depends(get_db),
     tna = _tna_base(db, v)   # variable = índice + margen (igual que la originación → simulado == contratado)
     cargo = _cargo(v, "OTORGAMIENTO")
     filas = cronograma(sistema, req.monto, req.plazo, tna, cargo, date.today(),
-                       **_params_cronograma(v, _feriados_engine(db)))
+                       **_params_cronograma(v, _feriados_engine(db), decimales_calculo(db)))
     r = resumen(filas, req.monto, v.frecuencia_pago or "MENSUAL", tna)
     cuotas = [schemas.PortalCuotaOut(
         numero=f["numero_cuota"], vencimiento=str(f["fecha_vencimiento"]),
@@ -268,7 +282,7 @@ def _cuota_estimada(db: Session, v, monto: float, plazo: int) -> tuple[float, fl
     sistema = _calc_codigo_por_version(db).get(v.calculador_version_id, "FRANCES")
     tna = _tna_base(db, v)
     filas = cronograma(sistema, monto, plazo, tna, _cargo(v, "OTORGAMIENTO"), date.today(),
-                       **_params_cronograma(v, _feriados_engine(db)))
+                       **_params_cronograma(v, _feriados_engine(db), decimales_calculo(db)))
     r = resumen(filas, monto, v.frecuencia_pago or "MENSUAL", tna)
     return (round(r["totalCuotas"] / len(filas), 2) if filas else 0.0, round(tna, 4))
 
@@ -299,6 +313,10 @@ def enviar_solicitud(req: schemas.PortalSolicitudIn, request: Request,
     v = _version_publicada_vigente(prod)
     if v is None:
         raise HTTPException(409, "El producto no está disponible para solicitar.")
+    # H-185: guarda dura de canal — un producto no habilitado en el canal del portal no se puede solicitar
+    # desde la web, aunque se conozca su id (no basta con ocultarlo del listado).
+    if not _ofrecible_web(db, v):
+        raise HTTPException(422, "El producto no está disponible por el canal web.")
     if not (float(v.monto_minimo) <= req.monto <= float(v.monto_maximo)):
         raise HTTPException(422, f"Monto fuera de rango ({float(v.monto_minimo):.0f}–{float(v.monto_maximo):.0f}).")
     if not (v.plazo_minimo <= req.plazo <= v.plazo_maximo):
@@ -386,7 +404,7 @@ def detalle_solicitud(numero: str, db: Session = Depends(get_db), c: Ciudadano =
         tna = _tna_base(db, v)
         filas = cronograma(sistema, float(s.monto_solicitado), s.plazo_solicitado, tna,
                            _cargo(v, "OTORGAMIENTO"), date.today(),
-                           **_params_cronograma(v, _feriados_engine(db)))
+                           **_params_cronograma(v, _feriados_engine(db), decimales_calculo(db)))
         total = round(sum(float(f["total"]) for f in filas), 2)
         cuotas = [schemas.PortalCuotaOut(
             numero=f["numero_cuota"], vencimiento=str(f["fecha_vencimiento"]),

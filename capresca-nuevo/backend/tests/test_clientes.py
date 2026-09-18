@@ -31,6 +31,22 @@ def test_alta_cliente_cuil_unico_y_dv(client):
     assert len([c for c in items if c["cuil"] == "20111111112"]) == 1
 
 
+def test_id_cliente_autogenerado(client):
+    """H-169: el id_cliente del maestro se AUTOGENERA (CL-<pk>), no es el CUIL ni un N° de solicitud.
+    Si el alta no manda código, el backend lo genera a partir del PK; un código explícito (ETL) se respeta."""
+    h = _auth(client)
+    r = client.post("/api/clientes", headers=h,
+                    json={"cuil": "20111111112", "apellido_nombre": "SIN CODIGO"})
+    assert r.status_code == 201
+    c = r.json()
+    assert c["id_cliente"] == f"CL-{c['id']:06d}"        # autogenerado del PK
+    assert c["id_cliente"] != c["cuil"] and not c["id_cliente"].startswith("SOL-")
+    # un código explícito (migración/ETL) se respeta tal cual
+    r2 = client.post("/api/clientes", headers=h,
+                     json={"id_cliente": "9988776655", "cuil": "20222222223", "apellido_nombre": "LEGACY"})
+    assert r2.status_code == 201 and r2.json()["id_cliente"] == "9988776655"
+
+
 def test_escritura_cliente_exige_permiso_backend(client):
     """H-156: el RBAC fino se enforca en el BACKEND, no sólo en el front. Un rol con CONSULTA sobre
     /clientes/maestro NO puede crear/editar/dar de baja (403); ADMG (sin_restricciones) sí."""
